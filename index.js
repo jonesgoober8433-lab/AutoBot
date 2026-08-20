@@ -11,8 +11,7 @@ app.get('/', (req, res) => {
   res.send('Auto-Bot Server is Online!');
 });
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ Web server started on Port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => { console.log(`✅ 網頁伺服器已啟動於 Port ${PORT}`);
 });
 
 // ==========================================

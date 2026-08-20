@@ -1,7 +1,7 @@
 {
   "name": "auto-bot-template",
   "version": "1.0.0",
-  "description": "Discord Bot 基礎樣板 (內建 Express 防休眠、占卜與 Firebase 資料庫)",
+  "description": "Discord Bot 基礎樣板 (內建 Express 防休眠、Firebase 資料庫與 node-cron 定時廣播排程)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -10,6 +10,7 @@
     "discord.js": "^14.14.1",
     "dotenv": "^16.4.5",
     "express": "^4.18.2",
-    "firebase-admin": "^12.0.0"
+    "firebase-admin": "^12.0.0",
+    "node-cron": "^3.0.3"
   }
 }

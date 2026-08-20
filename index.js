@@ -4,18 +4,18 @@ const express = require('express');
 const admin = require('firebase-admin');
 
 // ==========================================
-// 1. Wake-up server settings (Express)
+// 1. 喚醒伺服器設定 (Express)
 // ==========================================
 const app = express();
 app.get('/', (req, res) => {
-  res.send('Auto-Bot Server is Online!');
+  res.send('自動機器人伺服器已上線！');
 });
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => { console.log(`✅ 網頁伺服器已啟動於 Port ${PORT}`);
 });
 
 // ==========================================
-// 2. Firebase Initialization Connection
+// 2. Firebase 初始化連線
 // ==========================================
 let db;
 try {
@@ -25,16 +25,16 @@ try {
       credential: admin.credential.cert(serviceAccount)
     });
     db = admin.firestore();
-    console.log('✅ Firebase Firestore connection successful');
+    console.log('✅ Firebase Firestore 連線成功');
   } else {
-    console.log('⚠️ FIREBASE_CREDENTIALS not detected, skipping database connection');
+    console.log('⚠️ 未偵測到 FIREBASE_CREDENTIALS，跳過資料庫連線');
   }
 } catch (error) {
-  console.error('❌ Firebase initialization failed:', error.message);
+  console.error('❌ Firebase 初始化失敗:', error.message);
 }
 
 // ==========================================
-// 3. Define the slash commands to register
+// 3. 定義要註冊的斜線指令
 // ==========================================
 const commands = [
   {
@@ -48,12 +48,12 @@ const commands = [
 ];
 
 // ==========================================
-// 4. Discord Bot Core Logic
+// 4. Discord 機器人核心邏輯
 // ==========================================
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once('ready', async () => {
-  console.log(`✅ Bot successfully online, logged in as: ${client.user.tag}`);
+  console.log(`✅ 機器人已成功上線，登入身分：${client.user.tag}`);
   
   try {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
@@ -61,25 +61,25 @@ client.once('ready', async () => {
       Routes.applicationCommands(client.user.id),
       { body: commands },
     );
-    console.log('✅ Slash commands registered successfully!');
+    console.log('✅ 斜線指令註冊成功！');
   } catch (error) {
-    console.error('❌ Failed to register slash commands:', error);
+    console.error('❌ 註冊斜線指令失敗:', error);
   }
 });
 
-// 🌟 Listen for interactions
+// 🌟 監聽互動
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  // 🔮 Command: Divination (with database writing feature)
+  // 🔮 指令：占卜 (加入寫入資料庫功能)
   if (interaction.commandName === '占卜') {
-    // Since writing to the database takes time, first tell Discord we are processing
+    // 因為寫入資料庫需要時間，先告訴 Discord 我們正在處理
     await interaction.deferReply(); 
 
     const fortunes = ['大吉🌟', '中吉✨', '小吉🍵', '吉💪', '末吉🍂', '凶👀', '大凶🛌'];
     const result = fortunes[Math.floor(Math.random() * fortunes.length)];
 
-    // Attempt to save to Firebase
+    // 嘗試存入 Firebase
     if (db) {
       try {
         await db.collection('fortune_history').add({
@@ -96,7 +96,7 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.editReply(`🔮 來自星星的指引：${result}\n*(已自動為您存入歷史紀錄)*`);
   }
 
-  // 📜 Command: History (Database reading feature)
+  // 📜 指令：歷史占卜 (讀取資料庫功能)
   if (interaction.commandName === '歷史占卜') {
     if (!db) {
       return interaction.reply({ content: '❌ 資料庫未連線，無法查詢紀錄。', ephemeral: true });
@@ -106,7 +106,7 @@ client.on('interactionCreate', async (interaction) => {
 
     try {
       const userId = interaction.user.id;
-      // Fetch all records for this user from the database
+      // 從資料庫抓取這位使用者的所有紀錄
       const snapshot = await db.collection('fortune_history')
         .where('userId', '==', userId)
         .get();
@@ -115,7 +115,7 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.editReply('📜 你還沒有任何占卜紀錄喔！趕快先使用 `/占卜` 試試看吧！');
       }
 
-      // Extract data and sort by time from newest to oldest
+      // 將資料取出並依時間由新到舊排序
       const records = [];
       snapshot.forEach(doc => records.push(doc.data()));
       records.sort((a, b) => {
@@ -124,13 +124,13 @@ client.on('interactionCreate', async (interaction) => {
         return timeB - timeA;
       });
 
-      // Only take the top 5
+      // 只取前 5 筆
       const top5 = records.slice(0, 5);
 
-      // Construct message text
+      // 組合訊息文字
       let historyText = `📜 ${interaction.user.username} 的最近 5 次占卜紀錄：\n\n`;
       top5.forEach((data, index) => {
-        // Convert timestamp to Taiwan time string
+        // 將時間戳轉換為台灣時間字串
         const timeString = data.timestamp 
           ? data.timestamp.toDate().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }) 
           : '剛剛';

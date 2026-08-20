@@ -1,17 +1,32 @@
+// 1. 修正 require 為小寫 (這是導致直接崩潰的主因)
 require('dotenv').config(); 
 const { Client, GatewayIntentBits, REST, Routes } = require('discord.js');
 const express = require('express');
 const admin = require('firebase-admin');
 
 // ==========================================
-// 1. 喚醒伺服器設定 (Express)
+// 全域錯誤捕捉 (防止未知錯誤導致整個伺服器崩潰，引發 503 錯誤)
+// ==========================================
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ 發生未捕捉的 Promise 錯誤:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('❌ 發生未捕捉的例外錯誤:', error);
+});
+
+// ==========================================
+// 1. 喚醒伺服器設定 (Express) - Render 檢查健康狀態的關鍵
 // ==========================================
 const app = express();
+
+// Render 會不斷 ping 這個根目錄確保你的機器人還活著
 app.get('/', (req, res) => {
-  res.send('自動機器人伺服器已上線！');
+  res.status(200).send('✅ 自動機器人伺服器與 Web 服務正常運作中！');
 });
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => { console.log(`✅ 網頁伺服器已啟動於 Port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => { 
+  console.log(`✅ 網頁伺服器已成功啟動於 Port ${PORT}`);
 });
 
 // ==========================================
@@ -30,7 +45,7 @@ try {
     console.log('⚠️ 未偵測到 FIREBASE_CREDENTIALS，跳過資料庫連線');
   }
 } catch (error) {
-  console.error('❌ Firebase 初始化失敗:', error.message);
+  console.error('❌ Firebase 初始化失敗 (請檢查 JSON 格式是否為單行):', error.message);
 }
 
 // ==========================================
@@ -71,15 +86,13 @@ client.once('ready', async () => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  // 🔮 指令：占卜 (加入寫入資料庫功能)
+  // 🔮 指令：占卜
   if (interaction.commandName === '占卜') {
-    // 因為寫入資料庫需要時間，先告訴 Discord 我們正在處理
     await interaction.deferReply(); 
 
     const fortunes = ['大吉🌟', '中吉✨', '小吉🍵', '吉💪', '末吉🍂', '凶👀', '大凶🛌'];
     const result = fortunes[Math.floor(Math.random() * fortunes.length)];
 
-    // 嘗試存入 Firebase
     if (db) {
       try {
         await db.collection('fortune_history').add({
@@ -90,13 +103,14 @@ client.on('interactionCreate', async (interaction) => {
         });
       } catch (error) {
         console.error('寫入占卜紀錄失敗:', error);
+        // 繼續執行，不要讓機器人當機
       }
     }
 
     await interaction.editReply(`🔮 來自星星的指引：${result}\n*(已自動為您存入歷史紀錄)*`);
   }
 
-  // 📜 指令：歷史占卜 (讀取資料庫功能)
+  // 📜 指令：歷史占卜
   if (interaction.commandName === '歷史占卜') {
     if (!db) {
       return interaction.reply({ content: '❌ 資料庫未連線，無法查詢紀錄。', ephemeral: true });
@@ -106,16 +120,14 @@ client.on('interactionCreate', async (interaction) => {
 
     try {
       const userId = interaction.user.id;
-      // 從資料庫抓取這位使用者的所有紀錄
       const snapshot = await db.collection('fortune_history')
         .where('userId', '==', userId)
         .get();
 
       if (snapshot.empty) {
-        return interaction.editReply('📜 你還沒有任何占卜紀錄喔！趕快先使用 `/占卜` 試試看吧！');
+        return interaction.editReply('📜 你還沒有任何占卜紀錄喔！趕快先使用 /占卜 試試看吧！');
       }
 
-      // 將資料取出並依時間由新到舊排序
       const records = [];
       snapshot.forEach(doc => records.push(doc.data()));
       records.sort((a, b) => {
@@ -124,17 +136,13 @@ client.on('interactionCreate', async (interaction) => {
         return timeB - timeA;
       });
 
-      // 只取前 5 筆
       const top5 = records.slice(0, 5);
-
-      // 組合訊息文字
       let historyText = `📜 ${interaction.user.username} 的最近 5 次占卜紀錄：\n\n`;
       top5.forEach((data, index) => {
-        // 將時間戳轉換為台灣時間字串
         const timeString = data.timestamp 
           ? data.timestamp.toDate().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }) 
           : '剛剛';
-        historyText += `${index + 1}.[${timeString}] 抽到了 ${data.fortune}\n`;
+        historyText += `${index + 1}. [${timeString}] 抽到了 ${data.fortune}\n`;
       });
 
       await interaction.editReply(historyText);
@@ -145,4 +153,11 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+// 啟動機器人並加上錯誤捕捉
+if (!process.env.DISCORD_TOKEN) {
+  console.error('❌ 找不到 DISCORD_TOKEN，請檢查 Render 的 Environment 設定！');
+} else {
+  client.login(process.env.DISCORD_TOKEN).catch(err => {
+    console.error('❌ Discord 登入失敗:', err);
+  });
+}

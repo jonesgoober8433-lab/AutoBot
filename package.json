@@ -1,17 +1,16 @@
-# Discord 機器人 Token（必填）
-DISCORD_TOKEN=你的機器人TOKEN
-
-# Firebase 服務帳戶 JSON（選填，整包貼成一行）
-FIREBASE_CREDENTIALS={"type":"service_account", ...}
-
-# 新人加入時，機器人要在哪個頻道打招呼（右鍵頻道 → 複製頻道 ID）
-WELCOME_CHANNEL_ID=1540052273743532122
-
-# 填完問卷後，資料要送到哪個頻道給管理員看
-REVIEW_CHANNEL_ID=1540052697120645261
-
-# 填完問卷後要自動給予的身分組 ID（選填，留空就不給）已驗證
-MEMBER_ROLE_ID=1540053101120323685
-
-# Express 防休眠用的 Port（雲端平台通常會自動帶入）
-PORT=3000
+{
+  "name": "auto-bot-template",
+  "version": "1.0.0",
+  "description": "Discord Bot 基礎樣板 (內建 Express 防休眠、Firebase 資料庫與 node-cron 定時廣播排程)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "firebase-admin": "^12.0.0",
+    "node-cron": "^3.0.3"
+  }
+}

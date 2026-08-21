@@ -1,7 +1,7 @@
 require('dotenv').config(); 
 const { 
   Client, GatewayIntentBits, REST, Routes, 
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, 
+  ActionRowBuilder, SlashCommandBuilder,
   StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
   ModalBuilder, TextInputBuilder, TextInputStyle,
   PermissionFlagsBits, Events
@@ -24,14 +24,14 @@ const ROLES = {
     '冰雷': '1540051347376832594',
     '火毒': '1540051370416017449',
     '主教': '1540051392138444880',
-    '槍手': '1540051430050897921',
+    '槍神': '1540051430050897921',
     '拳霸': '1540051450904969317',
     '刀賊': '1540051596518494228',
     '鏢賊': '1540051618345652275'
   }
 };
 
-// 暫存使用者選擇的職業 (避免多人同時操作覆蓋)
+// 暫存使用者選擇的職業
 const userSelectedJob = new Map();
 
 // ==========================================
@@ -69,20 +69,21 @@ try {
 // 4. 定義要註冊的斜線指令
 // ==========================================
 const commands = [
-  {
-    name: '占卜',
-    description: '抽取今天的幸運運勢，並自動記錄到資料庫！',
-  },
-  {
-    name: '歷史占卜',
-    description: '從資料庫查詢你最近的 5 次占卜紀錄',
-  },
-  {
-    name: '發送報到面板',
-    description: '【管理員專用】發送新手報到按鈕與職業選單面板',
-    default_member_permissions: PermissionFlagsBits.Administrator.toString(),
-  }
-];
+  new SlashCommandBuilder()
+    .setName('幸運頻道')
+    .setDescription('設定最大頻道數，隨機抽取今日的幸運頻道並記錄！')
+    .addIntegerOption(option =>
+      option
+        .setName('最大頻道')
+        .setDescription('請輸入伺服器的最大頻道數字 (例如：20 或 30)')
+        .setRequired(true)
+        .setMinValue(1)
+    ),
+  new SlashCommandBuilder()
+    .setName('發送報到面板')
+    .setDescription('【管理員專用】發送新手報到按鈕與職業選單面板')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+].map(command => command.toJSON());
 
 // ==========================================
 // 5. Discord 機器人核心邏輯
@@ -129,52 +130,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ==========================
     if (interaction.isChatInputCommand()) {
       
-      // 🔮 指令：占卜
-      if (interaction.commandName === '占卜') {
-        await interaction.deferReply(); 
-        const fortunes = ['大吉🌟', '中吉✨', '小吉🍵', '吉💪', '末吉🍂', '凶👀', '大凶🛌'];
-        const result = fortunes[Math.floor(Math.random() * fortunes.length)];
+      // 🎲 指令：幸運頻道
+      if (interaction.commandName === '幸運頻道') {
+        await interaction.deferReply();
+
+        const maxChannel = interaction.options.getInteger('最大頻道');
+        const luckyChannel = Math.floor(Math.random() * maxChannel) + 1;
 
         if (db) {
           try {
-            await db.collection('fortune_history').add({
+            await db.collection('lucky_channel_history').add({
               userId: interaction.user.id,
               username: interaction.user.username,
-              fortune: result,
+              maxChannel: maxChannel,
+              luckyChannel: luckyChannel,
               timestamp: admin.firestore.FieldValue.serverTimestamp()
             });
           } catch (error) {
-            console.error('寫入占卜紀錄失敗:', error);
+            console.error('寫入幸運頻道紀錄失敗:', error);
           }
         }
-        await interaction.editReply(`🔮 來自星星的指引：${result}\n*(已自動為您存入歷史紀錄)*`);
+
+        await interaction.editReply(`🎲 **${interaction.user.username}** 的今日幸運頻道抽取結果：\n\n✨ 幸運頻道為：**第 ${luckyChannel} 頻道** (範圍 1 ~ ${maxChannel})\n*(已自動存入資料庫)*`);
       }
 
-      // 📜 指令：歷史占卜
-      if (interaction.commandName === '歷史占卜') {
-        if (!db) return interaction.reply({ content: '❌ 資料庫未連線，無法查詢紀錄。', ephemeral: true });
-        await interaction.deferReply();
-        try {
-          const snapshot = await db.collection('fortune_history').where('userId', '==', interaction.user.id).get();
-          if (snapshot.empty) return interaction.editReply('📜 你還沒有任何占卜紀錄喔！趕快先使用 /占卜 試試看吧！');
-          
-          const records = [];
-          snapshot.forEach(doc => records.push(doc.data()));
-          records.sort((a, b) => (b.timestamp ? b.timestamp.toMillis() : 0) - (a.timestamp ? a.timestamp.toMillis() : 0));
-          
-          let historyText = `📜 ${interaction.user.username} 的最近 5 次占卜紀錄：\n\n`;
-          records.slice(0, 5).forEach((data, index) => {
-            const timeString = data.timestamp ? data.timestamp.toDate().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }) : '剛剛';
-            historyText += `${index + 1}. [${timeString}] 抽到了 ${data.fortune}\n`; 
-          });
-          await interaction.editReply(historyText);
-        } catch (error) {
-          console.error('讀取歷史紀錄失敗:', error);
-          await interaction.editReply('❌ 讀取歷史紀錄時發生錯誤。');
-        }
-      }
-
-      // 🆕 指令：發送報到面板 (改為下拉式選單)
+      // 🆕 指令：發送報到面板
       if (interaction.commandName === '發送報到面板') {
         const selectMenu = new StringSelectMenuBuilder()
           .setCustomId('select_job_register')

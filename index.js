@@ -8,10 +8,13 @@ const {
 } = require('discord.js');
 const express = require('express');
 const admin = require('firebase-admin');
+const cron = require('node-cron');
 
 // ==========================================
-// 1. 身分組 ID 與職業選單設定
+// 1. 伺服器常數設定 (身分組 & 目標頻道 ID)
 // ==========================================
+const REPORT_CHANNEL_ID = process.env.REPORT_CHANNEL_ID || '1476762995454640159';
+
 const ROLES = {
   VERIFIED: '1540053101120323685',   // 已驗證
   UNVERIFIED: '1540053110846791762', // 未驗證
@@ -33,6 +36,22 @@ const ROLES = {
 
 // 暫存使用者選擇的職業
 const userSelectedJob = new Map();
+
+// 產生報到 / 更新等級 下拉選單 UI
+function createRegisterMenuRow() {
+  const selectMenu = new StringSelectMenuBuilder()
+    .setCustomId('select_job_register')
+    .setPlaceholder('🔽 請在此選擇你的主職業')
+    .addOptions(
+      Object.keys(ROLES.JOBS).map(jobName => 
+        new StringSelectMenuOptionBuilder()
+          .setLabel(jobName)
+          .setValue(jobName)
+          .setDescription(`選擇【${jobName}】並填寫報到 / 更新等級表單`)
+      )
+    );
+  return new ActionRowBuilder().addComponents(selectMenu);
+}
 
 // ==========================================
 // 2. 喚醒伺服器設定 (Express)
@@ -80,9 +99,21 @@ const commands = [
         .setMinValue(1)
     ),
   new SlashCommandBuilder()
-    .setName('發送報到面板')
-    .setDescription('【管理員專用】發送新手報到按鈕與職業選單面板')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setName('報到')
+    .setDescription('【管理員專用】發送報到 / 更新等級面板')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder()
+    .setName('職業查詢')
+    .setDescription('查詢伺服器成員的名冊資訊 (遊戲ID_職業_等級)')
+    .addStringOption(option =>
+      option
+        .setName('職業名稱')
+        .setDescription('選擇要查詢的特定職業 (若留空則顯示全部)')
+        .setRequired(false)
+        .addChoices(
+          Object.keys(ROLES.JOBS).map(jobName => ({ name: jobName, value: jobName }))
+        )
+    )
 ].map(command => command.toJSON());
 
 // ==========================================
@@ -110,6 +141,26 @@ client.once(Events.ClientReady, async () => {
   } catch (error) {
     console.error('❌ 註冊斜線指令失敗:', error);
   }
+
+  // 🌟 每週二早上 08:00 (台北時間) 自動發布「更新等級」公告
+  cron.schedule('0 0 8 * * 2', async () => {
+    console.log('⏰ 觸發每週二定時任務：發送更新等級面板');
+
+    try {
+      const channel = await client.channels.fetch(REPORT_CHANNEL_ID);
+      if (channel && channel.isTextBased()) {
+        await channel.send({
+          content: '📢 **【每週例行更新】** 早安冒險家們！又到了每週二更新等級的時間囉～\n若等級有提升或職業變更，請直接在下方選單重新選擇並提交資料喔！',
+          components: [createRegisterMenuRow()]
+        });
+        console.log(`✅ 已成功於頻道 ${REPORT_CHANNEL_ID} 發送更新面板`);
+      }
+    } catch (err) {
+      console.error('❌ 定時發送面板失敗:', err);
+    }
+  }, {
+    timezone: 'Asia/Taipei'
+  });
 });
 
 // 🌟 新成員加入時自動賦予「未驗證」身分組
@@ -154,26 +205,65 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.editReply(`🎲 **${interaction.user.username}** 的今日幸運頻道抽取結果：\n\n✨ 幸運頻道為：**第 ${luckyChannel} 頻道** (範圍 1 ~ ${maxChannel})\n*(已自動存入資料庫)*`);
       }
 
-      // 🆕 指令：發送報到面板
-      if (interaction.commandName === '發送報到面板') {
-        const selectMenu = new StringSelectMenuBuilder()
-          .setCustomId('select_job_register')
-          .setPlaceholder('🔽 請在此選擇你的主職業')
-          .addOptions(
-            Object.keys(ROLES.JOBS).map(jobName => 
-              new StringSelectMenuOptionBuilder()
-                .setLabel(jobName)
-                .setValue(jobName)
-                .setDescription(`選擇【${jobName}】並填寫報到表單`)
-            )
-          );
-
-        const row = new ActionRowBuilder().addComponents(selectMenu);
-
+      // 🆕 指令：報到
+      if (interaction.commandName === '報到') {
         await interaction.reply({
-          content: '歡迎來到伺服器！請先在下方下拉選單選擇你的 **主要職業**，隨後將彈出表單完成報到資料！',
-          components: [row]
+          content: '歡迎來到伺服器！請先在下方下拉選單選擇你的 **主要職業**，隨後將彈出表單完成報到 / 更新等級資料！',
+          components: [createRegisterMenuRow()]
         });
+      }
+
+      // 🔍 指令：職業查詢
+      if (interaction.commandName === '職業查詢') {
+        if (!db) return interaction.reply({ content: '❌ 資料庫未連線，無法查詢名冊。', ephemeral: true });
+        await interaction.deferReply();
+
+        const targetJob = interaction.options.getString('職業名稱');
+
+        try {
+          let query = db.collection('member_profiles');
+          if (targetJob) {
+            query = query.where('job', '==', targetJob);
+          }
+
+          const snapshot = await query.get();
+          if (snapshot.empty) {
+            return interaction.editReply(targetJob ? `📋 目前尚無 **【${targetJob}】** 的成員紀錄。` : '📋 目前尚無任何成員報到紀錄。');
+          }
+
+          // 去重處理：同一位使用者保留最新的一筆資料
+          const userMap = new Map();
+          snapshot.forEach(doc => {
+            const data = doc.data();
+            const existing = userMap.get(data.userId);
+            const dataTime = data.timestamp ? data.timestamp.toMillis() : 0;
+            if (!existing || (existing.time < dataTime)) {
+              userMap.set(data.userId, { ...data, time: dataTime });
+            }
+          });
+
+          const profiles = Array.from(userMap.values());
+          // 依等級由高至低排序
+          profiles.sort((a, b) => (parseInt(b.level) || 0) - (parseInt(a.level) || 0));
+
+          let replyText = targetJob 
+            ? `📋 **【${targetJob}】成員名冊 (共 ${profiles.length} 人)**\n\n`
+            : `📋 **伺服器成員名冊 (共 ${profiles.length} 人)**\n\n`;
+
+          profiles.forEach((p, idx) => {
+            replyText += `${idx + 1}. \`(${p.ign || '未填'}_${p.job}_${p.level}等)\` - <@${p.userId}>\n`;
+          });
+
+          // 超過 2000 字元截斷防呆
+          if (replyText.length > 1950) {
+            replyText = replyText.substring(0, 1950) + '\n...(資料過長已截斷)';
+          }
+
+          await interaction.editReply(replyText);
+        } catch (error) {
+          console.error('查詢名冊失敗:', error);
+          await interaction.editReply('❌ 查詢名冊時發生錯誤。');
+        }
       }
     }
 
@@ -187,9 +277,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const modal = new ModalBuilder()
           .setCustomId('modal_register')
-          .setTitle(`新手報到表單（已選：${selectedJob}）`);
+          .setTitle(`報到 / 更新等級（職業：${selectedJob}）`);
 
-        // 1. 遊戲名稱
         const ignInput = new TextInputBuilder()
           .setCustomId('input_ign')
           .setLabel('1. 你的遊戲名稱（遊戲ID）？')
@@ -197,7 +286,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setPlaceholder('例如：Edward')
           .setRequired(true);
 
-        // 2. 等級 (過濾掉文字，只留數字)
         const levelInput = new TextInputBuilder()
           .setCustomId('input_level')
           .setLabel('2. 你的角色等級？')
@@ -205,21 +293,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setPlaceholder('例如：120')
           .setRequired(true);
 
-        // 3. 加入原因
         const reasonInput = new TextInputBuilder()
           .setCustomId('input_reason')
-          .setLabel('3. 加入頻道的原因？')
+          .setLabel('3. 加入原因 / 近況更新？')
           .setStyle(TextInputStyle.Paragraph)
           .setPlaceholder('例如：想找人一起練等打王...')
-          .setRequired(true);
+          .setRequired(false);
 
-        // 4. 平常遊玩時間
         const timeInput = new TextInputBuilder()
           .setCustomId('input_time')
           .setLabel('4. 平常遊玩的時間？')
           .setStyle(TextInputStyle.Short)
           .setPlaceholder('例如：平日晚上 8 點到 12 點')
-          .setRequired(true);
+          .setRequired(false);
 
         modal.addComponents(
           new ActionRowBuilder().addComponents(ignInput),
@@ -240,14 +326,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.deferReply(); 
 
         const ign = interaction.fields.getTextInputValue('input_ign').trim();
-        // 將等級中的中文字(如「等」、「級」)過濾，提取純數字或保留乾淨格式
         const rawLevel = interaction.fields.getTextInputValue('input_level').trim();
         const level = rawLevel.replace(/[^0-9]/g, '') || rawLevel;
-        const reason = interaction.fields.getTextInputValue('input_reason').trim();
-        const playtime = interaction.fields.getTextInputValue('input_time').trim();
+        const reason = interaction.fields.getTextInputValue('input_reason')?.trim() || '無';
+        const playtime = interaction.fields.getTextInputValue('input_time')?.trim() || '未填寫';
         const chosenJob = userSelectedJob.get(interaction.user.id) || '未知職業';
 
-        // 格式化新暱稱：[等級_職業] 遊戲名稱 (Discord 暱稱上限 32 字元)
         const newNickname = `[${level}_${chosenJob}] ${ign}`.substring(0, 32);
 
         // 1. 寫入 Firebase 資料庫
@@ -264,11 +348,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
               timestamp: admin.firestore.FieldValue.serverTimestamp()
             });
           } catch (error) {
-            console.error('寫入報到資料失敗:', error);
+            console.error('寫入資料失敗:', error);
           }
         }
 
-        // 2. 身分組與伺服器暱稱修改處理
+        // 2. 身分組覆蓋與暱稱更新
         let roleSuccess = false;
         let nickSuccess = false;
 
@@ -283,44 +367,50 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // 賦予「已驗證」身分組
           await member.roles.add(ROLES.VERIFIED);
 
-          // 賦予所選職業身分組
-          const jobRoleId = ROLES.JOBS[chosenJob];
-          if (jobRoleId) {
-            await member.roles.add(jobRoleId);
+          // 清除舊的職業身分組
+          const allJobRoleIds = Object.values(ROLES.JOBS);
+          const oldJobRolesToRemove = member.roles.cache.filter(role => allJobRoleIds.includes(role.id));
+          if (oldJobRolesToRemove.size > 0) {
+            await member.roles.remove(oldJobRolesToRemove);
+          }
+
+          // 賦予新選的職業身分組
+          const newJobRoleId = ROLES.JOBS[chosenJob];
+          if (newJobRoleId) {
+            await member.roles.add(newJobRoleId);
           }
           roleSuccess = true;
 
-          // 自動修改伺服器暱稱
-          // 注意：Discord 不允許 Bot 修改「伺服器擁有者 (Server Owner)」的暱稱
+          // 自動更新伺服器暱稱
           try {
             await member.setNickname(newNickname);
             nickSuccess = true;
           } catch (nickError) {
-            console.error('❌ 修改暱稱失敗 (若為伺服器擁有者或身分組高於 Bot 則無法由 Bot 改名):', nickError.message);
+            console.error('❌ 修改暱稱失敗 (若為 Owner 則無法修改):', nickError.message);
           }
 
         } catch (roleError) {
           console.error('❌ 身分組賦予失敗:', roleError);
         }
 
-        // 3. 回覆報到結果
-        let replyContent = `🎉 歡迎 <@${interaction.user.id}> 完成報到！\n\n` +
+        // 3. 回覆報到 / 更新結果
+        let replyContent = `🎉 <@${interaction.user.id}> 的資料已完成更新！\n\n` +
           `**🎮 遊戲名稱**：${ign}\n` +
           `**⚔️ 職業**：${chosenJob}\n` +
           `**🎖️ 等級**：${level}\n` +
           `**⏱️ 遊玩時間**：${playtime}\n` +
-          `**📌 加入原因**：\n${reason}\n\n`;
+          `**📌 備註/原因**：\n${reason}\n\n`;
         
         if (roleSuccess) {
-          replyContent += `✨ 已為您賦予 **【已驗證】** 與 **【${chosenJob}】** 身分組！\n`;
+          replyContent += `✨ 已為您重新整理身分組為 **【已驗證】** 與 **【${chosenJob}】**！\n`;
         } else {
-          replyContent += `⚠️ 身分組自動賦予失敗，請通知管理員。\n`;
+          replyContent += `⚠️ 身分組自動賦予失敗，請通知管理員檢查權限。\n`;
         }
 
         if (nickSuccess) {
-          replyContent += `🏷️ 已將您的伺服器暱稱自動更新為：\`${newNickname}\``;
+          replyContent += `🏷️ 已將您的伺服器暱稱更新為：\`${newNickname}\``;
         } else {
-          replyContent += `*(提示：若您是伺服器擁有者或管理員，因權限保護限制無法由機器人自動改名)*`;
+          replyContent += `*(提示：若您是伺服器擁有者或管理員，因權限限制無法由機器人改名)*`;
         }
 
         await interaction.editReply({ content: replyContent });

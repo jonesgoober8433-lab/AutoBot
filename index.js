@@ -189,30 +189,42 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setCustomId('modal_register')
           .setTitle(`新手報到表單（已選：${selectedJob}）`);
 
+        // 1. 遊戲名稱
+        const ignInput = new TextInputBuilder()
+          .setCustomId('input_ign')
+          .setLabel('1. 你的遊戲名稱（遊戲ID）？')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('例如：Edward')
+          .setRequired(true);
+
+        // 2. 等級 (過濾掉文字，只留數字)
+        const levelInput = new TextInputBuilder()
+          .setCustomId('input_level')
+          .setLabel('2. 你的角色等級？')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('例如：120')
+          .setRequired(true);
+
+        // 3. 加入原因
         const reasonInput = new TextInputBuilder()
           .setCustomId('input_reason')
-          .setLabel('1. 加入頻道的原因？')
+          .setLabel('3. 加入頻道的原因？')
           .setStyle(TextInputStyle.Paragraph)
           .setPlaceholder('例如：想找人一起練等打王...')
           .setRequired(true);
 
-        const levelInput = new TextInputBuilder()
-          .setCustomId('input_level')
-          .setLabel('2. 你的等級？')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder('例如：120 等')
-          .setRequired(true);
-
+        // 4. 平常遊玩時間
         const timeInput = new TextInputBuilder()
           .setCustomId('input_time')
-          .setLabel('3. 平常遊玩的時間？')
+          .setLabel('4. 平常遊玩的時間？')
           .setStyle(TextInputStyle.Short)
           .setPlaceholder('例如：平日晚上 8 點到 12 點')
           .setRequired(true);
 
         modal.addComponents(
-          new ActionRowBuilder().addComponents(reasonInput),
+          new ActionRowBuilder().addComponents(ignInput),
           new ActionRowBuilder().addComponents(levelInput),
+          new ActionRowBuilder().addComponents(reasonInput),
           new ActionRowBuilder().addComponents(timeInput)
         );
 
@@ -227,10 +239,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId === 'modal_register') {
         await interaction.deferReply(); 
 
-        const reason = interaction.fields.getTextInputValue('input_reason');
-        const level = interaction.fields.getTextInputValue('input_level');
-        const playtime = interaction.fields.getTextInputValue('input_time');
+        const ign = interaction.fields.getTextInputValue('input_ign').trim();
+        // 將等級中的中文字(如「等」、「級」)過濾，提取純數字或保留乾淨格式
+        const rawLevel = interaction.fields.getTextInputValue('input_level').trim();
+        const level = rawLevel.replace(/[^0-9]/g, '') || rawLevel;
+        const reason = interaction.fields.getTextInputValue('input_reason').trim();
+        const playtime = interaction.fields.getTextInputValue('input_time').trim();
         const chosenJob = userSelectedJob.get(interaction.user.id) || '未知職業';
+
+        // 格式化新暱稱：[等級_職業] 遊戲名稱 (Discord 暱稱上限 32 字元)
+        const newNickname = `[${level}_${chosenJob}] ${ign}`.substring(0, 32);
 
         // 1. 寫入 Firebase 資料庫
         if (db) {
@@ -238,9 +256,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             await db.collection('member_profiles').add({
               userId: interaction.user.id,
               username: interaction.user.username,
-              reason: reason,
+              ign: ign,
               job: chosenJob,
               level: level,
+              reason: reason,
               playtime: playtime,
               timestamp: admin.firestore.FieldValue.serverTimestamp()
             });
@@ -249,8 +268,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
         }
 
-        // 2. 身分組切換處理 (強制 fetch 確保取得伺服器最新成員實例)
+        // 2. 身分組與伺服器暱稱修改處理
         let roleSuccess = false;
+        let nickSuccess = false;
+
         try {
           const member = await interaction.guild.members.fetch(interaction.user.id);
           
@@ -267,19 +288,39 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (jobRoleId) {
             await member.roles.add(jobRoleId);
           }
-
           roleSuccess = true;
+
+          // 自動修改伺服器暱稱
+          // 注意：Discord 不允許 Bot 修改「伺服器擁有者 (Server Owner)」的暱稱
+          try {
+            await member.setNickname(newNickname);
+            nickSuccess = true;
+          } catch (nickError) {
+            console.error('❌ 修改暱稱失敗 (若為伺服器擁有者或身分組高於 Bot 則無法由 Bot 改名):', nickError.message);
+          }
+
         } catch (roleError) {
-          console.error('❌ 身分組賦予失敗 (請檢查 Bot 身分組順序是否高於目標身分組):', roleError);
+          console.error('❌ 身分組賦予失敗:', roleError);
         }
 
         // 3. 回覆報到結果
-        let replyContent = `🎉 歡迎 <@${interaction.user.id}> 完成報到！\n\n**📌 加入原因**：\n${reason}\n\n**⚔️ 職業**：${chosenJob}\n**🎖️ 等級**：${level}\n**⏱️ 遊玩時間**：${playtime}`;
+        let replyContent = `🎉 歡迎 <@${interaction.user.id}> 完成報到！\n\n` +
+          `**🎮 遊戲名稱**：${ign}\n` +
+          `**⚔️ 職業**：${chosenJob}\n` +
+          `**🎖️ 等級**：${level}\n` +
+          `**⏱️ 遊玩時間**：${playtime}\n` +
+          `**📌 加入原因**：\n${reason}\n\n`;
         
         if (roleSuccess) {
-          replyContent += `\n\n✨ 已為您賦予 **【已驗證】** 與 **【${chosenJob}】** 身分組！`;
+          replyContent += `✨ 已為您賦予 **【已驗證】** 與 **【${chosenJob}】** 身分組！\n`;
         } else {
-          replyContent += `\n\n⚠️ 已記錄資料，但身分組自動賦予失敗，請通知管理員檢查權限設定。`;
+          replyContent += `⚠️ 身分組自動賦予失敗，請通知管理員。\n`;
+        }
+
+        if (nickSuccess) {
+          replyContent += `🏷️ 已將您的伺服器暱稱自動更新為：\`${newNickname}\``;
+        } else {
+          replyContent += `*(提示：若您是伺服器擁有者或管理員，因權限保護限制無法由機器人自動改名)*`;
         }
 
         await interaction.editReply({ content: replyContent });

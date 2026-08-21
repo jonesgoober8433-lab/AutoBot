@@ -2,6 +2,7 @@ require('dotenv').config();
 const { 
   Client, GatewayIntentBits, REST, Routes, 
   ActionRowBuilder, ButtonBuilder, ButtonStyle, 
+  StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
   ModalBuilder, TextInputBuilder, TextInputStyle,
   PermissionFlagsBits, Events
 } = require('discord.js');
@@ -9,7 +10,7 @@ const express = require('express');
 const admin = require('firebase-admin');
 
 // ==========================================
-// 1. 身分組 ID 常數設定
+// 1. 身分組 ID 與職業選單設定
 // ==========================================
 const ROLES = {
   VERIFIED: '1540053101120323685',   // 已驗證
@@ -29,6 +30,9 @@ const ROLES = {
     '鏢賊': '1540051618345652275'
   }
 };
+
+// 暫存使用者選擇的職業 (避免多人同時操作覆蓋)
+const userSelectedJob = new Map();
 
 // ==========================================
 // 2. 喚醒伺服器設定 (Express)
@@ -75,7 +79,7 @@ const commands = [
   },
   {
     name: '發送報到面板',
-    description: '【管理員專用】發送新手報到按鈕面板',
+    description: '【管理員專用】發送新手報到按鈕與職業選單面板',
     default_member_permissions: PermissionFlagsBits.Administrator.toString(),
   }
 ];
@@ -83,7 +87,6 @@ const commands = [
 // ==========================================
 // 5. Discord 機器人核心邏輯
 // ==========================================
-// 注意：需加入 GuildMembers Intent 才能偵測成員加入
 const client = new Client({ 
   intents: [
     GatewayIntentBits.Guilds,
@@ -108,7 +111,7 @@ client.once(Events.ClientReady, async () => {
   }
 });
 
-// 🌟 [新增] 新成員加入時自動賦予「未驗證」身分組
+// 🌟 新成員加入時自動賦予「未驗證」身分組
 client.on(Events.GuildMemberAdd, async (member) => {
   try {
     await member.roles.add(ROLES.UNVERIFIED);
@@ -118,7 +121,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
   }
 });
 
-// 🌟 監聽互動 (包含斜線指令、按鈕點擊、表單送出)
+// 🌟 監聽互動 (包含斜線指令、選單選取、表單送出)
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // ==========================
@@ -171,30 +174,40 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
       }
 
-      // 🆕 指令：發送報到面板
+      // 🆕 指令：發送報到面板 (改為下拉式選單)
       if (interaction.commandName === '發送報到面板') {
-        const registerButton = new ButtonBuilder()
-          .setCustomId('btn_open_register')
-          .setLabel('📝 點我填寫報到資料')
-          .setStyle(ButtonStyle.Primary);
+        const selectMenu = new StringSelectMenuBuilder()
+          .setCustomId('select_job_register')
+          .setPlaceholder('🔽 請在此選擇你的主職業')
+          .addOptions(
+            Object.keys(ROLES.JOBS).map(jobName => 
+              new StringSelectMenuOptionBuilder()
+                .setLabel(jobName)
+                .setValue(jobName)
+                .setDescription(`選擇【${jobName}】並填寫報到表單`)
+            )
+          );
 
-        const row = new ActionRowBuilder().addComponents(registerButton);
+        const row = new ActionRowBuilder().addComponents(selectMenu);
 
         await interaction.reply({
-          content: '歡迎來到伺服器！請點擊下方的按鈕填寫你的報到資料，讓大家認識你喔！',
+          content: '歡迎來到伺服器！請先在下方下拉選單選擇你的 **主要職業**，隨後將彈出表單完成報到資料！',
           components: [row]
         });
       }
     }
 
     // ==========================
-    // [B] 處理按鈕點擊事件
+    // [B] 處理職業下拉選單選擇
     // ==========================
-    if (interaction.isButton()) {
-      if (interaction.customId === 'btn_open_register') {
+    if (interaction.isStringSelectMenu()) {
+      if (interaction.customId === 'select_job_register') {
+        const selectedJob = interaction.values[0];
+        userSelectedJob.set(interaction.user.id, selectedJob);
+
         const modal = new ModalBuilder()
           .setCustomId('modal_register')
-          .setTitle('新手報到表單');
+          .setTitle(`新手報到表單（已選：${selectedJob}）`);
 
         const reasonInput = new TextInputBuilder()
           .setCustomId('input_reason')
@@ -203,11 +216,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setPlaceholder('例如：想找人一起練等打王...')
           .setRequired(true);
 
-        const jobInput = new TextInputBuilder()
-          .setCustomId('input_job')
-          .setLabel('2. 你的職業與等級？')
+        const levelInput = new TextInputBuilder()
+          .setCustomId('input_level')
+          .setLabel('2. 你的等級？')
           .setStyle(TextInputStyle.Short)
-          .setPlaceholder('例如：黑騎士 / 120等 (請填寫對應職業)')
+          .setPlaceholder('例如：120 等')
           .setRequired(true);
 
         const timeInput = new TextInputBuilder()
@@ -219,7 +232,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         modal.addComponents(
           new ActionRowBuilder().addComponents(reasonInput),
-          new ActionRowBuilder().addComponents(jobInput),
+          new ActionRowBuilder().addComponents(levelInput),
           new ActionRowBuilder().addComponents(timeInput)
         );
 
@@ -235,8 +248,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.deferReply(); 
 
         const reason = interaction.fields.getTextInputValue('input_reason');
-        const job = interaction.fields.getTextInputValue('input_job');
+        const level = interaction.fields.getTextInputValue('input_level');
         const playtime = interaction.fields.getTextInputValue('input_time');
+        const chosenJob = userSelectedJob.get(interaction.user.id) || '未知職業';
 
         // 1. 寫入 Firebase 資料庫
         if (db) {
@@ -245,7 +259,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
               userId: interaction.user.id,
               username: interaction.user.username,
               reason: reason,
-              job_level: job,
+              job: chosenJob,
+              level: level,
               playtime: playtime,
               timestamp: admin.firestore.FieldValue.serverTimestamp()
             });
@@ -254,42 +269,43 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
         }
 
-        // 2. 身分組切換處理 (未驗證 -> 已驗證 + 職業身分組)
-        let assignedJobName = null;
-        if (interaction.member) {
-          try {
-            const member = interaction.member;
-
-            // 移除「未驗證」身分組
-            if (member.roles.cache.has(ROLES.UNVERIFIED)) {
-              await member.roles.remove(ROLES.UNVERIFIED);
-            }
-
-            // 新增「已驗證」身分組
-            await member.roles.add(ROLES.VERIFIED);
-
-            // 根據輸入的字串判斷職業
-            for (const [jobName, roleId] of Object.entries(ROLES.JOBS)) {
-              if (job.includes(jobName)) {
-                await member.roles.add(roleId);
-                assignedJobName = jobName;
-                break; // 匹配到第一個職業即停止
-              }
-            }
-          } catch (roleError) {
-            console.error('調整身分組時失敗 (請確認 Bot 身分組權限層級高於目標身分組):', roleError);
+        // 2. 身分組切換處理 (強制 fetch 確保取得伺服器最新成員實例)
+        let roleSuccess = false;
+        try {
+          const member = await interaction.guild.members.fetch(interaction.user.id);
+          
+          // 移除「未驗證」身分組
+          if (member.roles.cache.has(ROLES.UNVERIFIED)) {
+            await member.roles.remove(ROLES.UNVERIFIED);
           }
+
+          // 賦予「已驗證」身分組
+          await member.roles.add(ROLES.VERIFIED);
+
+          // 賦予所選職業身分組
+          const jobRoleId = ROLES.JOBS[chosenJob];
+          if (jobRoleId) {
+            await member.roles.add(jobRoleId);
+          }
+
+          roleSuccess = true;
+        } catch (roleError) {
+          console.error('❌ 身分組賦予失敗 (請檢查 Bot 身分組順序是否高於目標身分組):', roleError);
         }
 
-        // 3. 回覆結果
-        let replyContent = `🎉 歡迎 <@${interaction.user.id}> 完成報到！\n\n**📌 加入原因**：\n${reason}\n\n**⚔️ 職業/等級**：${job}\n**⏱️ 遊玩時間**：${playtime}`;
-        if (assignedJobName) {
-          replyContent += `\n\n✨ 已自動為您賦予 **【已驗證】** 與 **【${assignedJobName}】** 身分組！`;
+        // 3. 回覆報到結果
+        let replyContent = `🎉 歡迎 <@${interaction.user.id}> 完成報到！\n\n**📌 加入原因**：\n${reason}\n\n**⚔️ 職業**：${chosenJob}\n**🎖️ 等級**：${level}\n**⏱️ 遊玩時間**：${playtime}`;
+        
+        if (roleSuccess) {
+          replyContent += `\n\n✨ 已為您賦予 **【已驗證】** 與 **【${chosenJob}】** 身分組！`;
         } else {
-          replyContent += `\n\n✨ 已自動為您賦予 **【已驗證】** 身分組！*(未在文字中辨識出對應職業身分組)*`;
+          replyContent += `\n\n⚠️ 已記錄資料，但身分組自動賦予失敗，請通知管理員檢查權限設定。`;
         }
 
         await interaction.editReply({ content: replyContent });
+
+        // 清理暫存
+        userSelectedJob.delete(interaction.user.id);
       }
     }
   } catch (err) {

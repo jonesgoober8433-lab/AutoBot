@@ -46,7 +46,6 @@ const JOB_BUFFS = {
 
 const userChoiceMap = new Map();
 
-// 搞笑救濟文案庫
 const DONOR_ACTIONS = [
   "救濟了發起人一碗暖心熱湯", "贊助了一整包強力吸水面紙", "請喝了一杯全糖壓驚珍奶",
   "施捨了一張回村卷軸買水錢", "送上一份心靈創傷慰問金", "贊助鐵匠維修槌磨損費"
@@ -239,7 +238,6 @@ function createPartyBuffModal(partyId, charIgn, charJob, charLevel) {
   return modal;
 }
 
-// 輔助更新團練主訊息
 async function updatePartyMainMessage(partyData, newMembers, isClosed = false) {
   if (partyData.channelId && partyData.messageId) {
     try {
@@ -509,7 +507,7 @@ try {
 } catch (e) { console.error('❌ Firebase Error:', e.message); }
 
 // ==========================================
-// 7. 斜線指令註冊
+// 7. 斜線指令註冊 (支援多選項自訂門檻)
 // ==========================================
 const commands = [
   new SlashCommandBuilder()
@@ -536,11 +534,16 @@ const commands = [
     )
     .addSubcommand(sub =>
       sub.setName('衝卷')
-        .setDescription('發起裝備衝卷過幾卷或最終攻擊力/屬性數值門檻盤')
+        .setDescription('發起裝備衝卷過幾卷或自訂數值門檻落點盤')
         .addStringOption(o => o.setName('裝備名稱').setDescription('例如：紫色衝浪板、楓葉之盔').setRequired(true))
         .addStringOption(o => o.setName('截止時間').setDescription('填寫範例：15m、1h、20:00 等').setRequired(true))
-        .addIntegerOption(o => o.setName('最大卷數').setDescription('過卷數競猜上限 (1~10，若開數值門檻盤可填 7)').setRequired(false).setMinValue(1).setMaxValue(10))
-        .addStringOption(o => o.setName('數值門檻').setDescription('【數值門檻盤】自訂區間，逗號分隔 (例: 放棄<85, 85-95, 96-105, 頂級>106)').setRequired(false))
+        .addIntegerOption(o => o.setName('最大卷數').setDescription('過卷數上限 (1~10，若自訂選項可不理會)').setRequired(false).setMinValue(1).setMaxValue(10))
+        .addStringOption(o => o.setName('選項1').setDescription('【自訂門檻】選項 1 (例：放棄 < 85 G)').setRequired(false))
+        .addStringOption(o => o.setName('選項2').setDescription('【自訂門檻】選項 2 (例：及格 85~95 G)').setRequired(false))
+        .addStringOption(o => o.setName('選項3').setDescription('【自訂門檻】選項 3 (例：極品 96~105 G)').setRequired(false))
+        .addStringOption(o => o.setName('選項4').setDescription('【自訂門檻】選項 4 (例：神裝 > 106 G)').setRequired(false))
+        .addStringOption(o => o.setName('選項5').setDescription('【自訂門檻】選項 5 (選填)').setRequired(false))
+        .addStringOption(o => o.setName('選項6').setDescription('【自訂門檻】選項 6 (選填)').setRequired(false))
         .addStringOption(o => o.setName('底池金額').setDescription('加碼底池 (選填，例如：500w、1000w)').setRequired(false))
     ),
 
@@ -646,7 +649,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // 2. /查看團練 (支援 12 小時過期自動清理 + 下拉選單報名)
+      // 2. /查看團練
       if (commandName === '查看團練') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
         await interaction.deferReply();
@@ -660,7 +663,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         for (const doc of snap.docs) {
           const d = doc.data();
           const createdMs = d.createdAt?.toMillis?.() || nowMs;
-          // 超過 12 小時 (12 * 60 * 60 * 1000 ms) 自動關閉清理
           if (nowMs - createdMs > 43200000) {
             await db.collection('party_trainings').doc(d.id).update({ isClosed: true }).catch(() => {});
           } else {
@@ -708,7 +710,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ embeds: [partyListEmbed], components: [row] });
       }
 
-      // 3. /發起賭局 (二選一 / 衝卷 / 數值門檻盤)
+      // 3. /發起賭局 (二選一 / 衝卷 / 支援多自訂選項)
       if (commandName === '發起賭局') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
 
@@ -754,7 +756,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const equipName = interaction.options.getString('裝備名稱');
           const rawDeadline = interaction.options.getString('截止時間');
           const maxScroll = interaction.options.getInteger('最大卷數') || 7;
-          const rawThresholds = interaction.options.getString('數值門檻');
           const rawSeed = interaction.options.getString('底池金額');
 
           const deadline = parseDeadline(rawDeadline);
@@ -762,16 +763,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           if (!deadline) return interaction.editReply('❌ 時間格式無效！請輸入如 `15m`、`1h`、`20:00`。');
 
+          // 收集所有自訂選項
+          const customOptions = [
+            interaction.options.getString('選項1'),
+            interaction.options.getString('選項2'),
+            interaction.options.getString('選項3'),
+            interaction.options.getString('選項4'),
+            interaction.options.getString('選項5'),
+            interaction.options.getString('選項6')
+          ].filter(Boolean);
+
           const options = [];
 
-          // 判斷是否為「數值門檻盤」
-          if (rawThresholds && rawThresholds.trim()) {
-            const parts = rawThresholds.split(/[,，/|]+/).map(s => s.trim()).filter(Boolean);
-            parts.forEach((p, idx) => {
-              options.push({ name: `🎯 ${p}`, pool: 0, bets: {} });
+          if (customOptions.length >= 2) {
+            // 自訂多選項盤 (數值門檻盤 / 里程碑盤)
+            customOptions.forEach(optText => {
+              options.push({ name: `🎯 ${optText.trim()}`, pool: 0, bets: {} });
             });
           } else {
-            // 標準過卷數盤
+            // 經典過卷數盤
             for (let i = 0; i <= maxScroll; i++) {
               let label = `+${i} 卷`;
               if (i === 0) label = `💀 +0 (全爆)`;
@@ -785,7 +795,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             id: betDocRef.id,
             creatorId: interaction.user.id,
             creatorName: interaction.user.username,
-            title: rawThresholds ? `【${equipName}】最終攻擊力/屬性落點盤` : `【${equipName}】能過幾卷？(上限 +${maxScroll})`,
+            title: customOptions.length >= 2 ? `【${equipName}】自訂數值落點/里程碑盤` : `【${equipName}】能過幾卷？(上限 +${maxScroll})`,
             options, deadline, seedMoney,
             pityDonations: {},
             isScroll: true, isSettled: false, isPaused: false,
@@ -916,7 +926,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // 點擊特定角色按鈕 -> 100% 秒開 Modal (自動帶入對應的角色 ID / 職業 / 等級)
+      // 點擊特定角色按鈕 -> 100% 秒開 Modal
       if (customId.startsWith('party_reg_char_')) {
         const parts = customId.split('_');
         const partyId = parts[3];
@@ -1146,7 +1156,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // [C] 下拉選單處理
     // ----------------------------------------
     if (interaction.isStringSelectMenu()) {
-      // 從 /查看團練 中直接選取某一團加入
       if (interaction.customId === 'select_party_to_join') {
         const selectedVal = interaction.values[0];
         const partyId = selectedVal.replace('party_view_join_', '');
@@ -1192,7 +1201,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // 賭局選項選取
       if (interaction.customId.startsWith('bet_select_opt_')) {
         const betId = interaction.customId.replace('bet_select_opt_', '');
         const optIdx = parseInt(interaction.values[0]);
@@ -1200,7 +1208,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.reply({ content: `👉 已選中第 ${optIdx + 1} 個選項，現在可點擊下方按鈕下注！`, ephemeral: true });
       }
 
-      // 賭局結算執行
       if (interaction.customId.startsWith('settle_finalize_')) {
         await interaction.deferReply();
         const betId = interaction.customId.replace('settle_finalize_', '');
@@ -1339,7 +1346,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // [D] Modal 表單提交
     // ----------------------------------------
     if (interaction.isModalSubmit()) {
-      // 1. 團練 Buff 登記 (支援一人複選多角色)
       if (interaction.customId.startsWith('modal_party_buffs_')) {
         await interaction.deferReply({ ephemeral: true });
         const partyId = interaction.customId.replace('modal_party_buffs_', '');
@@ -1372,7 +1378,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           } catch (e) {}
         }
 
-        // 以 (userId + ign) 判斷，允許同一玩家報名不同分身
         const members = (partyData.members || []).filter(m => !(m.userId === interaction.user.id && m.ign === ign));
         members.push({ userId: interaction.user.id, ign, job, level, buffs, extraDevice });
 
@@ -1382,7 +1387,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`🎉 成功加入【${partyData.target}】團練！\n角色：\`${ign}\` (${job} Lv.${level})\nBuff：\`${Object.entries(buffs).map(([k, v]) => `${k}:${v}`).join(', ')}\`${extraDevice ? `\n自帶支援：\`${extraDevice}\`` : ''}`);
       }
 
-      // 2. 同情抖內提交
       if (interaction.customId.startsWith('modal_pity_donate_')) {
         await interaction.deferReply({ ephemeral: true });
         const betId = interaction.customId.replace('modal_pity_donate_', '');
@@ -1406,7 +1410,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`🩹 已成功登記同情救濟 \`${formatMeso(donateAmount)} 楓幣\`！\n*(若最終暴死，系統會公開乾爹乾媽名冊，並私密通知苦主領取)*`);
       }
 
-      // 3. 自訂下注提交
       if (interaction.customId.startsWith('modal_bet_custom_')) {
         await interaction.deferReply({ ephemeral: true });
         const betId = interaction.customId.replace('modal_bet_custom_', '');
@@ -1441,7 +1444,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`✅ 成功為 **${options[optIdx].name}** 下注 \`${formatMeso(betAmount)} 楓幣\`！(個人累計: ${formatMeso(currentBet + betAmount)})`);
       }
 
-      // 4. 名冊更新
       if (interaction.customId === 'modal_register_page1') {
         await interaction.deferReply();
         const mainIgn = interaction.fields.getTextInputValue('input_main_ign').trim();
@@ -1504,7 +1506,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         userChoiceMap.delete(interaction.user.id);
       }
 
-      // 5. 退休
       if (interaction.customId === 'modal_retire') {
         await interaction.deferReply();
         const ign = interaction.fields.getTextInputValue('input_retire_ign')?.trim() || interaction.user.displayName || interaction.user.username;
@@ -1513,7 +1514,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (db) {
           await db.collection('member_profiles').doc(interaction.user.id).set({
             userId: interaction.user.id, username: interaction.user.username,
-            mainIgn: ign, isRetired: true, timestamp: admin.firestore.FieldValue.serverTimestamp()
+            mainIgn, isRetired: true, timestamp: admin.firestore.FieldValue.serverTimestamp()
           }, { merge: true }).catch(() => {});
         }
 

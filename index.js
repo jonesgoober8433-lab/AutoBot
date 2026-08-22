@@ -80,7 +80,7 @@ function formatMeso(amount) {
   return (amount || 0).toLocaleString();
 }
 
-// 債務最小化撮合演算法 (Greedy Net Balance Matching)
+// 債務最小化撮合演算法
 function calculateMinTransfers(balances) {
   const debtors = [];
   const creditors = [];
@@ -144,7 +144,7 @@ function createMultiBetEmbed(betData) {
       `狀態：${isClosed ? '🔴 **已截止下注，等待結算**' : '🟢 **下注進行中！賠率隨人數即時變動**'}\n` +
       `━━━━━━━━━━━━━━━━━━━━`
     )
-    .setFooter({ text: 'Pari-mutuel 彩池分紅 | 結算時自動生成最省手續費轉帳清單' });
+    .setFooter({ text: 'Pari-mutuel 彩池分紅 | 結算時自動生成最少交易轉帳清單' });
 
   betData.options.forEach((opt) => {
     const odds = (opt.pool > 0) ? (totalPool / opt.pool).toFixed(2) : (totalPool > 0 ? '超高賠率' : '1.00');
@@ -423,7 +423,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const subCommand = interaction.options.getSubcommand();
 
-        // 1. 技能書模式
         if (subCommand === '技能書') {
           await interaction.deferReply();
           const bookName = interaction.options.getString('技能書名稱');
@@ -458,7 +457,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
         }
 
-        // 2. 衝卷模式 (支援兩階段中 maxScroll=2 等情境)
         if (subCommand === '衝卷') {
           await interaction.deferReply();
           const equipName = interaction.options.getString('裝備名稱');
@@ -677,7 +675,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [C] 下拉選單處理 (含最少交易分帳演算)
+    // [C] 下拉選單處理 (精簡化 ANSI 名冊樣式)
     // ----------------------------------------
     if (interaction.isStringSelectMenu()) {
       if (interaction.customId.startsWith('bet_select_opt_')) {
@@ -687,7 +685,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.reply({ content: `👉 已選中第 ${optIdx + 1} 個選項，現在可以點擊下方按鈕進行下注！`, ephemeral: true });
       }
 
-      // 賭局結算執行 (Pari-mutuel 彩池 + 最少交易筆數撮合)
+      // 賭局結算執行 (ANSI 格式化精簡)
       if (interaction.customId.startsWith('settle_finalize_')) {
         await interaction.deferReply();
         const betId = interaction.customId.replace('settle_finalize_', '');
@@ -707,10 +705,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const totalPool = playerPool + (betData.seedMoney || 0);
         const bonusPool = totalPool - winPool;
 
-        // 計算每個人的淨盈虧 (Net Balance)
-        const balances = {}; // { userId: { ign, net } }
+        const balances = {};
 
-        // 發起人底池計入 (若發起人無下注則淨支出底池)
         if (betData.seedMoney > 0) {
           balances[betData.creatorId] = {
             ign: betData.creatorName || '發起人底池',
@@ -718,7 +714,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           };
         }
 
-        // 初始化所有下注者本金扣除
         options.forEach(opt => {
           for (const [uid, b] of Object.entries(opt.bets || {})) {
             if (!balances[uid]) balances[uid] = { ign: b.ign, net: 0 };
@@ -726,39 +721,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
         });
 
-        // 贏家分配總彩金
         const winBets = Object.entries(winOption.bets || {});
         let resultsText = '```ansi\n';
         resultsText += `\u001b[1;33m🏆 最終結算：【${winOption.name}】獲勝！\u001b[0m\n\n`;
 
+        // 🌟 贏家名冊 (樣式精簡)
         if (winBets.length > 0) {
-          resultsText += `\u001b[1;32m=== 贏家名冊 (彩池加成派彩) ===\u001b[0m\n`;
+          resultsText += `\u001b[1;32m=== 贏家名冊 (哪有賭狗天天輸） ===\u001b[0m\n`;
           for (const [uid, b] of winBets) {
             const share = winPool > 0 ? (b.amount / winPool) * bonusPool : 0;
             const totalReturn = b.amount + Math.floor(share);
-            balances[uid].net += totalReturn; // 增加派彩
+            balances[uid].net += totalReturn;
 
-            resultsText += `\u001b[0;32m[哪有賭狗天天輸_${b.ign}_下注:${formatMeso(b.amount)}_+${formatMeso(Math.floor(share))}楓幣 (領回:${formatMeso(totalReturn)})]\u001b[0m\n`;
+            resultsText += `\u001b[0;32m[${b.ign}_下注:${formatMeso(b.amount)}_+${formatMeso(Math.floor(share))}楓幣 (領回:${formatMeso(totalReturn)})]\u001b[0m\n`;
           }
         } else {
-          resultsText += `\u001b[0;32m無人押中此選項，彩池全數保留/流局。\u001b[0m\n`;
+          resultsText += `\u001b[0;32m無人押中此選項，底池與彩池全數保留/退回。\u001b[0m\n`;
         }
 
-        // 輸家名單
-        resultsText += `\n\u001b[1;31m=== 輸家名冊 (通通沒收) ===\u001b[0m\n`;
+        // 🌟 輸家名冊 (樣式精簡)
+        resultsText += `\n\u001b[1;31m=== 輸家名冊 (賭狗賭狗賭到最後一無所有） ===\u001b[0m\n`;
         let hasLosers = false;
         options.forEach((opt, idx) => {
           if (idx !== winIdx) {
             for (const [uid, b] of Object.entries(opt.bets || {})) {
               hasLosers = true;
-              resultsText += `\u001b[0;31m[賭狗賭狗賭到最後一無所有_${b.ign}_下注:${formatMeso(b.amount)}_-${formatMeso(b.amount)}楓幣]\u001b[0m\n`;
+              resultsText += `\u001b[0;31m[${b.ign}_下注:${formatMeso(b.amount)}_-${formatMeso(b.amount)}楓幣]\u001b[0m\n`;
             }
           }
         });
         if (!hasLosers) resultsText += `\u001b[0;31m無輸家。\u001b[0m\n`;
         resultsText += '```';
 
-        // 執行債務最小化演算法
         const transfers = calculateMinTransfers(balances);
         let transferGuide = `🧾 **【最少交易次數轉帳指引（共 ${transfers.length} 筆）】**\n*(依照以下指引在遊戲內交易，可大幅降低跑圖次數與官方手續費！)*\n\n`;
 
@@ -779,7 +773,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const settleEmbed = new EmbedBuilder()
           .setColor(0xF1C40F)
           .setTitle(`🎉【競猜結算公告】${betData.title}`)
-          .setDescription(`恭喜 **【${winOption.name}】** 成功開出！\n總獎金池 \`${formatMeso(totalPool)} 楓幣\` 已派發完畢！\n\n${resultsText}\n${transferGuide}`);
+          .setDescription(`恭喜 **【${winOption.name}】** 成功開出！\n總獎金池 \`${formatMeso(totalPool)} 楓幣\` 已依照比例全數派發完畢！\n\n${resultsText}\n${transferGuide}`);
 
         return await interaction.editReply({ embeds: [settleEmbed] });
       }

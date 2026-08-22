@@ -29,7 +29,6 @@ const ROLES = {
   }
 };
 
-// 職業核心 Buff 圖示與名稱
 const JOB_BUFFS = {
   '黑騎士': ['🔥神聖之火', '🛡️力量消除'],
   '聖騎士': ['🛡️魔法消除'],
@@ -39,7 +38,7 @@ const JOB_BUFFS = {
   '主教': ['✨神聖祈禱', '👼天使祝福'],
   '冰雷': ['🧠精神強化'],
   '火毒': ['🧠精神強化'],
-  '鏢賊': ['⚡速', '🤑幸運術'],
+  '鏢賊': ['⚡速', '🍀幸運術'],
   '刀賊': ['⚡速'],
   '拳霸': ['🥊最終極速'],
   '槍神': []
@@ -501,7 +500,7 @@ const commands = [
     .addStringOption(o => o.setName('地點').setDescription('例如：蛋龍、忘卻6、神木村').setRequired(true))
     .addStringOption(o => o.setName('開打時間').setDescription('例如：2026.08.22 13:00 或 今晚 8 點').setRequired(true))
     .addStringOption(o => o.setName('綁定需求').setDescription('例如：需綁定主教、鏢賊綁眼、缺火 (無則留空)').setRequired(false))
-    .addStringOption(o => o.setName('自備機台').setDescription('主揪自備支援機台 (例如：自帶2台火+祈禱機)').setRequired(false))
+    .addStringOption(o => o.setName('自備機台').setDescription('主揪自備支援設備 (例如：設備上限2台，火+祈禱機)').setRequired(false))
     .addStringOption(o => o.setName('備註時長').setDescription('例如：打氣場、打 Hot time 2 小時').setRequired(false))
     .addIntegerOption(o => o.setName('需要人數').setDescription('預計招募人數 (預設 6 人)').setRequired(false).setMinValue(2).setMaxValue(30)),
 
@@ -793,12 +792,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [B] 按鈕處理
+    // [B] 按鈕處理 (直接秒開 Modal，絕不卡死)
     // ----------------------------------------
     if (interaction.isButton()) {
       const customId = interaction.customId;
 
-      // 1. 團練報名按鈕 (發送專屬選單，點選後直接打開 Modal)
+      // 1. 團練報名按鈕 (彈出帶按鈕的角色選單卡片)
       if (customId.startsWith('party_join_')) {
         const partyId = customId.replace('party_join_', '');
         const partyDoc = await db.collection('party_trainings').doc(partyId).get();
@@ -808,33 +807,68 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (partyData.isClosed) return interaction.reply({ content: '🔒 該團練已關閉招募。', ephemeral: true });
 
         const prevData = await fetchUserDocSafe(interaction.user.id);
-        const charOptions = [];
+        const rows = [];
+        let currentRow = new ActionRowBuilder();
 
         if (prevData.mainIgn) {
-          charOptions.push(new StringSelectMenuOptionBuilder()
-            .setLabel(`👑 本尊：${prevData.mainIgn} (${prevData.mainJob} Lv.${prevData.mainLevel})`)
-            .setValue(`CHAR_MAIN`));
+          currentRow.addComponents(
+            new ButtonBuilder()
+              .setCustomId(`party_reg_char_${partyId}_main`)
+              .setLabel(`👑 本尊：${prevData.mainIgn} (${prevData.mainJob})`.substring(0, 80))
+              .setStyle(ButtonStyle.Success)
+          );
         }
 
         if (prevData.subs && Array.isArray(prevData.subs)) {
-          prevData.subs.forEach((s, idx) => {
-            charOptions.push(new StringSelectMenuOptionBuilder()
-              .setLabel(`⚔️ 分身：${s.ign} (${s.job} Lv.${s.level})`)
-              .setValue(`CHAR_SUB_${idx}`));
+          prevData.subs.slice(0, 3).forEach((s, idx) => {
+            currentRow.addComponents(
+              new ButtonBuilder()
+                .setCustomId(`party_reg_char_${partyId}_sub_${idx}`)
+                .setLabel(`⚔️ ${s.ign} (${s.job})`.substring(0, 80))
+                .setStyle(ButtonStyle.Primary)
+            );
           });
         }
 
-        charOptions.push(new StringSelectMenuOptionBuilder()
-          .setLabel('✏️ 自訂其他角色/職業')
-          .setValue('CHAR_CUSTOM'));
+        if (currentRow.components.length > 0) rows.push(currentRow);
+
+        const customRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`party_reg_char_${partyId}_custom`)
+            .setLabel('✏️ 自訂角色資訊與職業')
+            .setStyle(ButtonStyle.Secondary)
+        );
+        rows.push(customRow);
 
         return await interaction.reply({
-          content: '👉 **請從你的名冊中選擇要報名團練的角色：**',
-          components: [new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder().setCustomId(`party_select_char_${partyId}`).setPlaceholder('點此選擇名冊角色').addOptions(charOptions)
-          )],
+          content: '👉 **請點擊下方按鈕選擇你要報名的角色（將直接打開 Buff 登記表單）：**',
+          components: rows,
           ephemeral: true
         });
+      }
+
+      // 點擊特定角色按鈕 -> 100% 秒開 Modal 表單
+      if (customId.startsWith('party_reg_char_')) {
+        const parts = customId.split('_');
+        const partyId = parts[3];
+        const type = parts[4]; // 'main', 'sub', 'custom'
+
+        const prevData = await fetchUserDocSafe(interaction.user.id);
+        let charIgn = prevData.mainIgn || interaction.user.displayName;
+        let charJob = prevData.mainJob || '黑騎士';
+        let charLevel = prevData.mainLevel || '120';
+
+        if (type === 'sub') {
+          const subIdx = parseInt(parts[5]);
+          const sub = prevData.subs?.[subIdx];
+          if (sub) { charIgn = sub.ign; charJob = sub.job; charLevel = sub.level; }
+        } else if (type === 'custom') {
+          charIgn = interaction.user.displayName;
+          charJob = '黑騎士';
+          charLevel = '120';
+        }
+
+        return await interaction.showModal(createPartyBuffModal(partyId, charIgn, charJob, charLevel));
       }
 
       // 2. 團練取消報名
@@ -980,7 +1014,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // 衝卷多選項快捷 +100w
+      // 衝卷快捷 +100w
       if (customId.startsWith('bet_act_100w_')) {
         const betId = customId.replace('bet_act_100w_', '');
         const selectedOptIdx = userChoiceMap.get(`bet_choice_${interaction.user.id}_${betId}`);
@@ -1043,28 +1077,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [C] 下拉選單處理 (直接調用 Modal，防止卡住)
+    // [C] 下拉選單處理
     // ----------------------------------------
     if (interaction.isStringSelectMenu()) {
-      // 團練名冊角色選擇 -> 直接開啟 Modal
-      if (interaction.customId.startsWith('party_select_char_')) {
-        const partyId = interaction.customId.replace('party_select_char_', '');
-        const selectedVal = interaction.values[0];
-        const prevData = await fetchUserDocSafe(interaction.user.id);
-
-        let charIgn = prevData.mainIgn || interaction.user.displayName;
-        let charJob = prevData.mainJob || '黑騎士';
-        let charLevel = prevData.mainLevel || '120';
-
-        if (selectedVal.startsWith('CHAR_SUB_')) {
-          const subIdx = parseInt(selectedVal.replace('CHAR_SUB_', ''));
-          const sub = prevData.subs?.[subIdx];
-          if (sub) { charIgn = sub.ign; charJob = sub.job; charLevel = sub.level; }
-        }
-
-        return await interaction.showModal(createPartyBuffModal(partyId, charIgn, charJob, charLevel));
-      }
-
       // 賭局選項選取
       if (interaction.customId.startsWith('bet_select_opt_')) {
         const betId = interaction.customId.replace('bet_select_opt_', '');

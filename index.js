@@ -273,7 +273,7 @@ function createMultiBetEmbed(betData) {
 
   const embed = new EmbedBuilder()
     .setColor(betData.isPaused ? 0xE74C3C : (isExpired ? 0x95A5A6 : 0xE67E22))
-    .setTitle(betData.isScroll ? `📜【裝備衝卷競猜】${betData.title}` : `📖【技能書點擊賭局】${betData.title}`)
+    .setTitle(betData.isScroll ? `📜【裝備衝卷/數值競猜】${betData.title}` : `📖【技能書點擊賭局】${betData.title}`)
     .setDescription(
       `👑 **發起人**：<@${betData.creatorId}>\n` +
       `🎁 **發起人底池**：\`${formatMeso(betData.seedMoney || 0)} 楓幣\`\n` +
@@ -323,7 +323,7 @@ function createMultiBetComponents(betId, options, isScroll = false) {
       new StringSelectMenuOptionBuilder().setLabel(opt.name).setValue(`${idx}`).setDescription(`選擇投注【${opt.name}】`)
     );
     const row1 = new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder().setCustomId(`bet_select_opt_${betId}`).setPlaceholder('🔽 請先點此選擇你要押注的選項/過卷數').addOptions(selectOptions)
+      new StringSelectMenuBuilder().setCustomId(`bet_select_opt_${betId}`).setPlaceholder('🔽 請先點此選擇你要押注的選項/區間').addOptions(selectOptions)
     );
     const row2 = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`bet_act_100w_${betId}`).setLabel('💵 快捷 +100w').setStyle(ButtonStyle.Primary),
@@ -430,10 +430,14 @@ async function generateJobEmbed(targetJob) {
       const charList = [];
       for (const m of members) {
         if (m.isRetired) continue;
-        if (m.mainJob === jobName) charList.push({ text: `\`(${m.mainIgn}_Lv.${m.mainLevel})\` <@${m.userId}> **【本】**`, level: parseInt(m.mainLevel) || 0 });
+        if (m.mainJob === jobName) {
+          charList.push({ text: `\`(${m.mainIgn}_Lv.${m.mainLevel})\` <@${m.userId}> **【本】**`, level: parseInt(m.mainLevel) || 0 });
+        }
         if (m.subs && Array.isArray(m.subs)) {
           m.subs.forEach(s => {
-            if (s?.job === jobName) charList.push({ text: `\`(${s.ign}_Lv.${s.level})\` <@${m.userId}> *(本尊: ${m.mainIgn})*`, level: parseInt(s.level) || 0 });
+            if (s?.job === jobName) {
+              charList.push({ text: `\`(${s.ign}_Lv.${s.level})\` <@${m.userId}> *(本尊: ${m.mainIgn})*`, level: parseInt(s.level) || 0 });
+            }
           });
         }
       }
@@ -532,10 +536,11 @@ const commands = [
     )
     .addSubcommand(sub =>
       sub.setName('衝卷')
-        .setDescription('發起裝備衝卷過幾卷競猜 (+0 ~ +10)')
+        .setDescription('發起裝備衝卷過幾卷或最終攻擊力/屬性數值門檻盤')
         .addStringOption(o => o.setName('裝備名稱').setDescription('例如：紫色衝浪板、楓葉之盔').setRequired(true))
-        .addIntegerOption(o => o.setName('最大卷數').setDescription('該裝備總卷數上限 (例如：2、7 或 10)').setRequired(true).setMinValue(1).setMaxValue(10))
         .addStringOption(o => o.setName('截止時間').setDescription('填寫範例：15m、1h、20:00 等').setRequired(true))
+        .addIntegerOption(o => o.setName('最大卷數').setDescription('過卷數競猜上限 (1~10，若開數值門檻盤可填 7)').setRequired(false).setMinValue(1).setMaxValue(10))
+        .addStringOption(o => o.setName('數值門檻').setDescription('【數值門檻盤】自訂區間，逗號分隔 (例: 放棄<85, 85-95, 96-105, 頂級>106)').setRequired(false))
         .addStringOption(o => o.setName('底池金額').setDescription('加碼底池 (選填，例如：500w、1000w)').setRequired(false))
     ),
 
@@ -635,14 +640,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
           components: createPartyComponents(partyRef.id, false)
         });
 
-        // 記錄 messageId 與 channelId 以便後續自動同步主看板
         partyData.channelId = interaction.channelId;
         partyData.messageId = msg.id;
         await partyRef.set(partyData);
         return;
       }
 
-      // 2. /查看團練 (免 Firebase composite 索引)
+      // 2. /查看團練 (支援 12 小時過期自動清理 + 下拉選單報名)
       if (commandName === '查看團練') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
         await interaction.deferReply();
@@ -650,12 +654,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const snap = await db.collection('party_trainings').where('isClosed', '==', false).get();
         if (snap.empty) return interaction.editReply('📜 目前沒有進行招募中的團練，使用 `/團練` 發起一個吧！');
 
-        const docs = [];
-        snap.forEach(doc => docs.push(doc.data()));
-        docs.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
+        const nowMs = Date.now();
+        const activeParties = [];
+
+        for (const doc of snap.docs) {
+          const d = doc.data();
+          const createdMs = d.createdAt?.toMillis?.() || nowMs;
+          // 超過 12 小時 (12 * 60 * 60 * 1000 ms) 自動關閉清理
+          if (nowMs - createdMs > 43200000) {
+            await db.collection('party_trainings').doc(d.id).update({ isClosed: true }).catch(() => {});
+          } else {
+            activeParties.push(d);
+          }
+        }
+
+        if (activeParties.length === 0) {
+          return interaction.editReply('📜 目前所有團練均已過期或關閉招募，使用 `/團練` 發起一個新團吧！');
+        }
+
+        activeParties.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
 
         const partyListEmbed = new EmbedBuilder().setColor(0x3498DB).setTitle('⚔️【進行中團練總覽】');
-        docs.slice(0, 5).forEach(d => {
+        const selectMenuOptions = [];
+
+        activeParties.slice(0, 5).forEach((d, idx) => {
           const memberCount = d.members?.length || 0;
           const buffPool = [];
           (d.members || []).forEach(m => {
@@ -663,16 +685,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
 
           partyListEmbed.addFields({
-            name: `📍 地點：${d.target} (${memberCount}/${d.maxCount}人) - 隊長: <@${d.creatorId}>`,
-            value: `⏰ **時間**：\`${d.startTime}\` | 📌 **綁定**：\`${d.bindReq}\`\n✨ **Buff**：\`${buffPool.length ? buffPool.join(' | ') : '暫無'}\``,
+            name: `${idx + 1}. 📍 ${d.target} (${memberCount}/${d.maxCount}人) - 隊長: <@${d.creatorId}>`,
+            value: `⏰ **時間**：\`${d.startTime}\` | 📌 **限制**：\`${d.bindReq}\`\n✨ **Buff**：\`${buffPool.length ? buffPool.join(' | ') : '暫無'}\``,
             inline: false
           });
+
+          selectMenuOptions.push(
+            new StringSelectMenuOptionBuilder()
+              .setLabel(`${idx + 1}. 報名【${d.target}】(${memberCount}/${d.maxCount}人)`.substring(0, 100))
+              .setValue(`party_view_join_${d.id}`)
+              .setDescription(`時間: ${d.startTime}`.substring(0, 100))
+          );
         });
 
-        return await interaction.editReply({ embeds: [partyListEmbed] });
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('select_party_to_join')
+            .setPlaceholder('🔽 點此直接選擇並加入其中一團')
+            .addOptions(selectMenuOptions)
+        );
+
+        return await interaction.editReply({ embeds: [partyListEmbed], components: [row] });
       }
 
-      // 3. /發起賭局
+      // 3. /發起賭局 (二選一 / 衝卷 / 數值門檻盤)
       if (commandName === '發起賭局') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
 
@@ -716,8 +752,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (subCommand === '衝卷') {
           await interaction.deferReply();
           const equipName = interaction.options.getString('裝備名稱');
-          const maxScroll = interaction.options.getInteger('最大卷數');
           const rawDeadline = interaction.options.getString('截止時間');
+          const maxScroll = interaction.options.getInteger('最大卷數') || 7;
+          const rawThresholds = interaction.options.getString('數值門檻');
           const rawSeed = interaction.options.getString('底池金額');
 
           const deadline = parseDeadline(rawDeadline);
@@ -726,11 +763,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (!deadline) return interaction.editReply('❌ 時間格式無效！請輸入如 `15m`、`1h`、`20:00`。');
 
           const options = [];
-          for (let i = 0; i <= maxScroll; i++) {
-            let label = `+${i} 卷`;
-            if (i === 0) label = `💀 +0 (全爆)`;
-            else if (i === maxScroll) label = `👑 +${i} (完美神裝)`;
-            options.push({ name: label, pool: 0, bets: {} });
+
+          // 判斷是否為「數值門檻盤」
+          if (rawThresholds && rawThresholds.trim()) {
+            const parts = rawThresholds.split(/[,，/|]+/).map(s => s.trim()).filter(Boolean);
+            parts.forEach((p, idx) => {
+              options.push({ name: `🎯 ${p}`, pool: 0, bets: {} });
+            });
+          } else {
+            // 標準過卷數盤
+            for (let i = 0; i <= maxScroll; i++) {
+              let label = `+${i} 卷`;
+              if (i === 0) label = `💀 +0 (全爆)`;
+              else if (i === maxScroll) label = `👑 +${i} (完美神裝)`;
+              options.push({ name: label, pool: 0, bets: {} });
+            }
           }
 
           const betDocRef = db.collection('active_bets').doc();
@@ -738,7 +785,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             id: betDocRef.id,
             creatorId: interaction.user.id,
             creatorName: interaction.user.username,
-            title: `【${equipName}】能過幾卷？(上限 +${maxScroll})`,
+            title: rawThresholds ? `【${equipName}】最終攻擊力/屬性落點盤` : `【${equipName}】能過幾卷？(上限 +${maxScroll})`,
             options, deadline, seedMoney,
             pityDonations: {},
             isScroll: true, isSettled: false, isPaused: false,
@@ -869,7 +916,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // 點擊特定角色按鈕 -> 100% 秒開 Modal
+      // 點擊特定角色按鈕 -> 100% 秒開 Modal (自動帶入對應的角色 ID / 職業 / 等級)
       if (customId.startsWith('party_reg_char_')) {
         const parts = customId.split('_');
         const partyId = parts[3];
@@ -1099,6 +1146,52 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // [C] 下拉選單處理
     // ----------------------------------------
     if (interaction.isStringSelectMenu()) {
+      // 從 /查看團練 中直接選取某一團加入
+      if (interaction.customId === 'select_party_to_join') {
+        const selectedVal = interaction.values[0];
+        const partyId = selectedVal.replace('party_view_join_', '');
+
+        const prevData = await fetchUserDocSafe(interaction.user.id);
+        const rows = [];
+        let currentRow = new ActionRowBuilder();
+
+        if (prevData.mainIgn) {
+          currentRow.addComponents(
+            new ButtonBuilder()
+              .setCustomId(`party_reg_char_${partyId}_main`)
+              .setLabel(`👑 本尊：${prevData.mainIgn} (${prevData.mainJob})`.substring(0, 80))
+              .setStyle(ButtonStyle.Success)
+          );
+        }
+
+        if (prevData.subs && Array.isArray(prevData.subs)) {
+          prevData.subs.slice(0, 3).forEach((s, idx) => {
+            currentRow.addComponents(
+              new ButtonBuilder()
+                .setCustomId(`party_reg_char_${partyId}_sub_${idx}`)
+                .setLabel(`⚔️ ${s.ign} (${s.job})`.substring(0, 80))
+                .setStyle(ButtonStyle.Primary)
+            );
+          });
+        }
+
+        if (currentRow.components.length > 0) rows.push(currentRow);
+
+        const customRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`party_reg_char_${partyId}_custom`)
+            .setLabel('✏️ 自訂角色資訊與職業')
+            .setStyle(ButtonStyle.Secondary)
+        );
+        rows.push(customRow);
+
+        return await interaction.reply({
+          content: '👉 **請點擊下方按鈕選擇你要報名的角色（將直接打開 Buff 登記表單）：**',
+          components: rows,
+          ephemeral: true
+        });
+      }
+
       // 賭局選項選取
       if (interaction.customId.startsWith('bet_select_opt_')) {
         const betId = interaction.customId.replace('bet_select_opt_', '');
@@ -1167,7 +1260,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
         if (!hasLosers) resultsText += `\u001b[0;31m無輸家。\u001b[0m\n`;
 
-        const isBust = winOption.name.includes('+0') || winOption.name.includes('全爆') || winOption.name.includes('爆掉');
+        const isBust = winOption.name.includes('+0') || winOption.name.includes('全爆') || winOption.name.includes('爆掉') || winOption.name.includes('放棄');
         const donations = Object.entries(betData.pityDonations || {});
 
         if (isBust && donations.length > 0) {
@@ -1243,10 +1336,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [D] Modal 表單提交 (修復並保證回覆)
+    // [D] Modal 表單提交
     // ----------------------------------------
     if (interaction.isModalSubmit()) {
-      // 1. 團練 Buff 登記
+      // 1. 團練 Buff 登記 (支援一人複選多角色)
       if (interaction.customId.startsWith('modal_party_buffs_')) {
         await interaction.deferReply({ ephemeral: true });
         const partyId = interaction.customId.replace('modal_party_buffs_', '');
@@ -1279,7 +1372,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           } catch (e) {}
         }
 
-        const members = (partyData.members || []).filter(m => m.userId !== interaction.user.id);
+        // 以 (userId + ign) 判斷，允許同一玩家報名不同分身
+        const members = (partyData.members || []).filter(m => !(m.userId === interaction.user.id && m.ign === ign));
         members.push({ userId: interaction.user.id, ign, job, level, buffs, extraDevice });
 
         await db.collection('party_trainings').doc(partyId).update({ members });

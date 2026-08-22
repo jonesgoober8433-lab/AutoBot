@@ -30,69 +30,131 @@ const ROLES = {
 };
 
 const userSelectedJob = new Map();
-const userCustomBetChoice = new Map(); // 暫存自訂下注選項
 
 // ==========================================
-// 2. 賭局輔助函式模組
+// 2. 工具與賭局模組
 // ==========================================
 
-// 格式化數字顯示 (如 5000000 -> 500 萬)
+// 時間解析器：支援 10m, 2h, 1d, 21:30, 2026-08-23 20:00
+function parseDeadline(inputStr) {
+  if (!inputStr) return null;
+  const str = inputStr.trim().toLowerCase();
+  const now = new Date();
+
+  const relMatch = str.match(/^(\d+)(m|h|d|min|hr|day|分|小時|天)$/);
+  if (relMatch) {
+    const val = parseInt(relMatch[1]);
+    const unit = relMatch[2];
+    if (unit.startsWith('m') || unit === '分') return now.getTime() + val * 60 * 1000;
+    if (unit.startsWith('h') || unit === '小時') return now.getTime() + val * 60 * 60 * 1000;
+    if (unit.startsWith('d') || unit === '天') return now.getTime() + val * 24 * 60 * 60 * 1000;
+  }
+
+  const timeMatch = str.match(/^(\d{1,2}):(\d{2})$/);
+  if (timeMatch) {
+    const target = new Date(now);
+    target.setHours(parseInt(timeMatch[1]), parseInt(timeMatch[2]), 0, 0);
+    if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
+    return target.getTime();
+  }
+
+  const parsed = Date.parse(inputStr);
+  if (!isNaN(parsed) && parsed > now.getTime()) return parsed;
+
+  const numOnly = parseInt(str);
+  if (!isNaN(numOnly) && numOnly > 0) return now.getTime() + numOnly * 60 * 1000;
+
+  return null;
+}
+
+// 解析金額字串 (支援 500w, 1e, 5000000)
+function parseMoneyInput(rawStr) {
+  if (!rawStr) return 0;
+  const str = rawStr.toLowerCase().trim();
+  if (str.includes('w') || str.includes('萬')) return (parseFloat(str.replace(/[^0-9.]/g, '')) || 0) * 10000;
+  if (str.includes('e') || str.includes('億')) return (parseFloat(str.replace(/[^0-9.]/g, '')) || 0) * 100000000;
+  return parseInt(str.replace(/[^0-9]/g, '')) || 0;
+}
+
 function formatMeso(amount) {
   if (amount >= 100000000) return `${(amount / 100000000).toFixed(2)} 億`;
   if (amount >= 10000) return `${(amount / 10000).toFixed(0)} 萬`;
-  return amount.toLocaleString();
+  return (amount || 0).toLocaleString();
 }
 
-// 產生賭局 Embed
-function createBetEmbed(betData) {
-  const totalPool = betData.poolOption1 + betData.poolOption2;
-  const odds1 = betData.poolOption1 > 0 ? (totalPool / betData.poolOption1).toFixed(2) : '無上限';
-  const odds2 = betData.poolOption2 > 0 ? (totalPool / betData.poolOption2).toFixed(2) : '無上限';
-  const now = Date.now();
-  const isClosed = now >= betData.deadline;
+// 產生賭局 Embed (含底池與即時賠率計算)
+function createMultiBetEmbed(betData) {
+  let playerPool = 0;
+  betData.options.forEach(opt => playerPool += (opt.pool || 0));
+  const totalPool = playerPool + (betData.seedMoney || 0);
 
-  return new EmbedBuilder()
+  const isClosed = Date.now() >= betData.deadline;
+
+  const embed = new EmbedBuilder()
     .setColor(isClosed ? 0x95A5A6 : 0xE67E22)
-    .setTitle(`🎲【社群賭局】${betData.title}`)
+    .setTitle(betData.isScroll ? `📜【裝備衝卷競猜】${betData.title}` : `🎲【社群即時賭局】${betData.title}`)
     .setDescription(
       `👑 **發起人**：<@${betData.creatorId}>\n` +
+      `🎁 **發起人加碼底池**：\`${formatMeso(betData.seedMoney || 0)} 楓幣\`\n` +
       `⏳ **截止時間**：<t:${Math.floor(betData.deadline / 1000)}:R> (<t:${Math.floor(betData.deadline / 1000)}:F>)\n` +
-      `💰 **總獎金池**：\`${formatMeso(totalPool)} 楓幣\`\n` +
-      `狀態：${isClosed ? '🔴 **已截止下注，等待發起人/管理員結算**' : '🟢 **下注火熱進行中！**'}\n` +
+      `💰 **總獎金池 (底池+玩家)**：\`${formatMeso(totalPool)} 楓幣\`\n` +
+      `狀態：${isClosed ? '🔴 **已截止下注，等待結算**' : '🟢 **下注火熱進行中！賠率即時變動！**'}\n` +
       `━━━━━━━━━━━━━━━━━━━━`
     )
-    .addFields(
-      {
-        name: `🟢 【選項 1】${betData.option1}`,
-        value: `💵 目前彩池：\`${formatMeso(betData.poolOption1)} 楓幣\`\n👥 下注人數：\`${Object.keys(betData.bets1 || {}).length} 人\`\n📈 當前即時賠率：\`${odds1}x\``,
-        inline: true
-      },
-      {
-        name: `🔴 【選項 2】${betData.option2}`,
-        value: `💵 目前彩池：\`${formatMeso(betData.poolOption2)} 楓幣\`\n👥 下注人數：\`${Object.keys(betData.bets2 || {}).length} 人\`\n📈 當前即時賠率：\`${odds2}x\``,
-        inline: true
-      }
-    )
-    .setFooter({ text: '純屬社群娛樂，輸贏請以遊戲內結果為準' });
+    .setFooter({ text: 'Pari-mutuel 共同彩池分紅制 | 輸家彩池將全數按比例派發給贏家' });
+
+  betData.options.forEach((opt) => {
+    // 即時賠率 = 總獎金池 / 該選項目前下注額
+    const odds = (opt.pool > 0) ? (totalPool / opt.pool).toFixed(2) : (totalPool > 0 ? '超高賠率(暫無人押)' : '1.00');
+    const userCount = Object.keys(opt.bets || {}).length;
+    embed.addFields({
+      name: `${opt.name}`,
+      value: `💵 目前彩池：\`${formatMeso(opt.pool || 0)}\`\n👥 下注人數：\`${userCount} 人\`\n📈 即時賠率：\`${odds}x\``,
+      inline: true
+    });
+  });
+
+  return embed;
 }
 
-// 產生賭局操作按鈕面板
-function createBetComponents(betId, option1, option2) {
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`bet_btn_${betId}_opt1_100w`).setLabel(`🟢 ${option1} (+100w)`).setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`bet_btn_${betId}_opt2_100w`).setLabel(`🔴 ${option2} (+100w)`).setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(`bet_btn_${betId}_custom`).setLabel('✏️ 自訂金額下注').setStyle(ButtonStyle.Primary)
-  );
+function createMultiBetComponents(betId, options) {
+  if (options.length <= 3) {
+    const row1 = new ActionRowBuilder();
+    options.forEach((opt, idx) => {
+      row1.addComponents(
+        new ButtonBuilder().setCustomId(`bet_quick_${betId}_${idx}`).setLabel(`${opt.name} (+100w)`).setStyle(ButtonStyle.Primary)
+      );
+    });
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`bet_custom_btn_${betId}`).setLabel('✏️ 自訂金額下注').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`bet_settle_btn_${betId}`).setLabel('⚖️ 一鍵結算').setStyle(ButtonStyle.Secondary)
+    );
+    return [row1, row2];
+  } else {
+    const selectOptions = options.map((opt, idx) =>
+      new StringSelectMenuOptionBuilder().setLabel(opt.name).setValue(`${idx}`).setDescription(`選擇投注【${opt.name}】`)
+    );
+    const row1 = new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId(`bet_select_opt_${betId}`).setPlaceholder('🔽 點此選擇你要押注的過卷數 / 選項').addOptions(selectOptions)
+    );
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`bet_act_100w_${betId}`).setLabel('💵 快捷下注 +100w').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`bet_custom_btn_${betId}`).setLabel('✏️ 自訂金額下注').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`bet_settle_btn_${betId}`).setLabel('⚖️ 一鍵結算').setStyle(ButtonStyle.Secondary)
+    );
+    return [row1, row2];
+  }
+}
 
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`bet_btn_${betId}_settle`).setLabel('⚖️ 發起人/管理員一鍵結算').setStyle(ButtonStyle.Secondary)
-  );
-
-  return [row1, row2];
+// 檢查全伺服器是否有正在進行中的賭局
+async function hasActiveBet() {
+  if (!db) return false;
+  const snapshot = await db.collection('active_bets').where('isSettled', '==', false).get();
+  return !snapshot.empty;
 }
 
 // ==========================================
-// 3. 通用工具與名冊函式
+// 3. 通用名冊工具模組
 // ==========================================
 function buildMainSelectMenu() {
   const options = Object.keys(ROLES.JOBS).map(job =>
@@ -227,11 +289,19 @@ try {
 // 5. 斜線指令註冊
 // ==========================================
 const commands = [
-  new SlashCommandBuilder().setName('發起賭局').setDescription('發起一個下注競猜賭局')
+  new SlashCommandBuilder().setName('發起賭局').setDescription('發起二選一賭局 (同時間全服限一局)')
     .addStringOption(o => o.setName('題目').setDescription('賭局題目 (例如：小明的三飛閃30能過嗎？)').setRequired(true))
     .addStringOption(o => o.setName('選項1').setDescription('選項 1 (例如：會過)').setRequired(true))
     .addStringOption(o => o.setName('選項2').setDescription('選項 2 (例如：爆掉)').setRequired(true))
-    .addIntegerOption(o => o.setName('截止時間').setDescription('下注截止時間 (幾分鐘後截止，例如：10)').setRequired(true).setMinValue(1)),
+    .addStringOption(o => o.setName('截止時間').setDescription('填寫範例：30m(分)、2h(小時)、1d(天)、21:30、或 2026-08-23 20:00').setRequired(true))
+    .addStringOption(o => o.setName('底池金額').setDescription('發起人自掏腰包加碼底池 (選填，例如：500w、1000w)').setRequired(false)),
+  
+  new SlashCommandBuilder().setName('發起衝卷').setDescription('發起裝備衝卷過幾卷競猜 (+0 ~ +10)')
+    .addStringOption(o => o.setName('裝備名稱').setDescription('例如：紫色衝浪板、楓葉之盔').setRequired(true))
+    .addIntegerOption(o => o.setName('最大卷數').setDescription('該裝備總卷數上限 (例如：7 或 10)').setRequired(true).setMinValue(1).setMaxValue(10))
+    .addStringOption(o => o.setName('截止時間').setDescription('填寫範例：15m、1h、20:00 等').setRequired(true))
+    .addStringOption(o => o.setName('底池金額').setDescription('發起人自掏腰包加碼底池 (選填，例如：500w、1000w)').setRequired(false)),
+
   new SlashCommandBuilder().setName('幸運頻道').setDescription('抽取今日幸運頻道')
     .addIntegerOption(o => o.setName('最大頻道').setDescription('最大頻道數').setRequired(true).setMinValue(1)),
   new SlashCommandBuilder().setName('報到').setDescription('【管理員專用】發送報到面板').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -250,7 +320,6 @@ client.once(Events.ClientReady, async () => {
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
   } catch (e) { console.error('❌ 指令註冊失敗:', e); }
 
-  // 每週二例行廣播與每日 199 倒數
   cron.schedule('0 0 8 * * *', async () => {
     try {
       const channel = await client.channels.fetch(REPORT_CHANNEL_ID);
@@ -288,7 +357,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
 });
 
 // ==========================================
-// 6. 互動事件監聽核心
+// 6. 互動事件核心監聽
 // ==========================================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
@@ -298,34 +367,94 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isChatInputCommand()) {
       const { commandName } = interaction;
 
-      // 🎲 發起賭局
+      // 1. 發起二選一賭局
       if (commandName === '發起賭局') {
-        if (!db) return interaction.reply({ content: '❌ 資料庫未連線，無法開局。', ephemeral: true });
+        if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
+
+        // 檢查是否已有進行中的局
+        if (await hasActiveBet()) {
+          return interaction.reply({ content: '⚠️ **伺服器目前已有正在進行中的賭局！**\n為了維持秩序與彩池集中，請等待當前賭局結算後再開新局！', ephemeral: true });
+        }
+
         await interaction.deferReply();
 
         const title = interaction.options.getString('題目');
-        const option1 = interaction.options.getString('選項1');
-        const option2 = interaction.options.getString('選項2');
-        const minutes = interaction.options.getInteger('截止時間');
-        const deadline = Date.now() + minutes * 60 * 1000;
+        const opt1 = interaction.options.getString('選項1');
+        const opt2 = interaction.options.getString('選項2');
+        const rawDeadline = interaction.options.getString('截止時間');
+        const rawSeed = interaction.options.getString('底池金額');
+        
+        const deadline = parseDeadline(rawDeadline);
+        const seedMoney = parseMoneyInput(rawSeed);
+
+        if (!deadline) return interaction.editReply('❌ 時間格式無效！請輸入如 `30m`、`2h`、`1d`、`21:30`。');
+
+        const betDocRef = db.collection('active_bets').doc();
+        const options = [
+          { name: `🟢 ${opt1}`, pool: 0, bets: {} },
+          { name: `🔴 ${opt2}`, pool: 0, bets: {} }
+        ];
+
+        const betData = {
+          id: betDocRef.id,
+          creatorId: interaction.user.id,
+          creatorName: interaction.user.username,
+          title, options, deadline, seedMoney,
+          isScroll: false, isSettled: false,
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        };
+
+        await betDocRef.set(betData);
+        return await interaction.editReply({
+          embeds: [createMultiBetEmbed(betData)],
+          components: createMultiBetComponents(betDocRef.id, options)
+        });
+      }
+
+      // 2. 發起裝備衝卷競猜
+      if (commandName === '發起衝卷') {
+        if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
+
+        if (await hasActiveBet()) {
+          return interaction.reply({ content: '⚠️ **伺服器目前已有正在進行中的賭局！**\n請等待當前賭局結算後再開新局！', ephemeral: true });
+        }
+
+        await interaction.deferReply();
+
+        const equipName = interaction.options.getString('裝備名稱');
+        const maxScroll = interaction.options.getInteger('最大卷數');
+        const rawDeadline = interaction.options.getString('截止時間');
+        const rawSeed = interaction.options.getString('底池金額');
+
+        const deadline = parseDeadline(rawDeadline);
+        const seedMoney = parseMoneyInput(rawSeed);
+
+        if (!deadline) return interaction.editReply('❌ 時間格式無效！請輸入如 `15m`、`1h`、`20:00`。');
+
+        const options = [];
+        for (let i = 0; i <= maxScroll; i++) {
+          let label = `+${i} 卷`;
+          if (i === 0) label = `💀 +0 (全爆)`;
+          else if (i === maxScroll) label = `👑 +${i} (完美神裝)`;
+          options.push({ name: label, pool: 0, bets: {} });
+        }
 
         const betDocRef = db.collection('active_bets').doc();
         const betData = {
           id: betDocRef.id,
           creatorId: interaction.user.id,
           creatorName: interaction.user.username,
-          title, option1, option2,
-          deadline, isSettled: false,
-          poolOption1: 0, poolOption2: 0,
-          bets1: {}, bets2: {},
+          title: `【${equipName}】能過幾卷？(上限 +${maxScroll})`,
+          options, deadline, seedMoney,
+          isScroll: true, isSettled: false,
           createdAt: admin.firestore.FieldValue.serverTimestamp()
         };
 
         await betDocRef.set(betData);
-        const embed = createBetEmbed(betData);
-        const components = createBetComponents(betDocRef.id, option1, option2);
-
-        return await interaction.editReply({ embeds: [embed], components });
+        return await interaction.editReply({
+          embeds: [createMultiBetEmbed(betData)],
+          components: createMultiBetComponents(betDocRef.id, options)
+        });
       }
 
       if (commandName === '幸運頻道') {
@@ -377,12 +506,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [B] 賭局下注與結算按鈕
+    // [B] 賭局按鈕 (即時動態刷新)
     // ----------------------------------------
     if (interaction.isButton()) {
       const customId = interaction.customId;
 
-      // 1. 快速更新名片按鈕
       if (customId === 'btn_quick_edit') {
         const prevData = await fetchUserDocSafe(interaction.user.id);
         const defaultJob = prevData.mainJob || Object.keys(ROLES.JOBS)[0];
@@ -390,151 +518,185 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(createRegisterModal(defaultJob, prevData));
       }
 
-      // 2. 賭局下注按鈕 (以 bet_btn_ 開頭)
-      if (customId.startsWith('bet_btn_')) {
-        const parts = customId.split('_');
-        const betId = parts[2];
-        const action = parts[3];
-
-        if (!db) return interaction.reply({ content: '❌ 資料庫連線異常', ephemeral: true });
-
+      // 1. 結算按鈕
+      if (customId.startsWith('bet_settle_btn_')) {
+        const betId = customId.replace('bet_settle_btn_', '');
         const betDoc = await db.collection('active_bets').doc(betId).get();
-        if (!betDoc.exists) return interaction.reply({ content: '❌ 該賭局已不存在或已移除。', ephemeral: true });
+        if (!betDoc.exists) return interaction.reply({ content: '❌ 該賭局已失效。', ephemeral: true });
 
         const betData = betDoc.data();
+        const isCreator = interaction.user.id === betData.creatorId;
+        const isAdmin = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
 
-        // 結算流程
-        if (action === 'settle') {
-          const isCreator = interaction.user.id === betData.creatorId;
-          const isAdmin = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
+        if (!isCreator && !isAdmin) return interaction.reply({ content: '❌ 只有發起人或管理員可以結算！', ephemeral: true });
+        if (Date.now() < betData.deadline) return interaction.reply({ content: `⏳ 尚未到達截止時間！請在 <t:${Math.floor(betData.deadline / 1000)}:R> 後再進行結算。`, ephemeral: true });
+        if (betData.isSettled) return interaction.reply({ content: '⚠️ 該賭局已經結算完畢！', ephemeral: true });
 
-          if (!isCreator && !isAdmin) {
-            return interaction.reply({ content: '❌ 只有發起人或管理員可以執行結算！', ephemeral: true });
-          }
+        const selectOptions = betData.options.map((opt, idx) =>
+          new StringSelectMenuOptionBuilder().setLabel(`🏆 勝方：【${opt.name}】`).setValue(`${idx}`)
+        );
 
-          if (Date.now() < betData.deadline) {
-            return interaction.reply({ content: `⏳ 尚未到達截止時間！請在 <t:${Math.floor(betData.deadline / 1000)}:R> 後再進行結算。`, ephemeral: true });
-          }
+        return await interaction.reply({
+          content: `⚖️ **請選擇【${betData.title}】最終獲勝的結果進行獎金派發：**`,
+          components: [new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder().setCustomId(`settle_finalize_${betId}`).setPlaceholder('選擇最終獲勝選項').addOptions(selectOptions)
+          )],
+          ephemeral: true
+        });
+      }
 
-          if (betData.isSettled) {
-            return interaction.reply({ content: '⚠️ 該賭局已經完成結算過囉！', ephemeral: true });
-          }
+      // 2. 快捷下注 +100w (二選一)
+      if (customId.startsWith('bet_quick_')) {
+        const parts = customId.split('_');
+        const betId = parts[2];
+        const optIdx = parseInt(parts[3]);
 
-          // 彈出選擇勝方選單
-          const selectMenu = new StringSelectMenuBuilder()
-            .setCustomId(`settle_choice_${betId}`)
-            .setPlaceholder('🏆 請選擇最終獲勝的選項')
-            .addOptions([
-              new StringSelectMenuOptionBuilder().setLabel(`🟢 勝方：【${betData.option1}】`).setValue('opt1'),
-              new StringSelectMenuOptionBuilder().setLabel(`🔴 勝方：【${betData.option2}】`).setValue('opt2')
-            ]);
+        const betDoc = await db.collection('active_bets').doc(betId).get();
+        if (!betDoc.exists) return interaction.reply({ content: '❌ 賭局已失效', ephemeral: true });
+        const betData = betDoc.data();
 
-          return await interaction.reply({
-            content: `⚖️ **請點選最終獲勝的結果進行獎金派發：**`,
-            components: [new ActionRowBuilder().addComponents(selectMenu)],
-            ephemeral: true
-          });
-        }
+        if (Date.now() >= betData.deadline) return interaction.reply({ content: '🛑 該賭局已截止下注！', ephemeral: true });
 
-        // 檢查截止狀態
-        if (Date.now() >= betData.deadline) {
-          return interaction.reply({ content: '🛑 該賭局已截止下注，請等待結果公佈！', ephemeral: true });
-        }
-
-        // 自訂金額彈窗
-        if (action === 'custom') {
-          const modal = new ModalBuilder().setCustomId(`modal_bet_custom_${betId}`).setTitle(`自訂下注金額`);
-          const choiceInput = new TextInputBuilder()
-            .setCustomId('input_bet_choice')
-            .setLabel(`選擇選項 (請填 1 或 2)`)
-            .setPlaceholder(`1 = ${betData.option1} | 2 = ${betData.option2}`)
-            .setStyle(TextInputStyle.Short)
-            .setRequired(true);
-
-          const amountInput = new TextInputBuilder()
-            .setCustomId('input_bet_amount')
-            .setLabel(`下注金額 (萬為單位或純數字)`)
-            .setPlaceholder(`例如：500w 或 5000000`)
-            .setStyle(TextInputStyle.Short)
-            .setRequired(true);
-
-          modal.addComponents(new ActionRowBuilder().addComponents(choiceInput), new ActionRowBuilder().addComponents(amountInput));
-          return await interaction.showModal(modal);
-        }
-
-        // 快捷下注 +100w (1,000,000)
-        const isOpt1 = action === 'opt1';
         const addAmount = 1000000;
-        const targetBets = isOpt1 ? betData.bets1 : betData.bets2;
         const userDoc = await fetchUserDocSafe(interaction.user.id);
         const playerIgn = userDoc.mainIgn || interaction.user.displayName || interaction.user.username;
 
-        const currentBet = targetBets[interaction.user.id]?.amount || 0;
-        targetBets[interaction.user.id] = { ign: playerIgn, amount: currentBet + addAmount };
+        const options = betData.options;
+        const currentBet = options[optIdx].bets[interaction.user.id]?.amount || 0;
+        options[optIdx].bets[interaction.user.id] = { ign: playerIgn, amount: currentBet + addAmount };
+        options[optIdx].pool = (options[optIdx].pool || 0) + addAmount;
 
-        const updatePayload = isOpt1
-          ? { poolOption1: betData.poolOption1 + addAmount, bets1: targetBets }
-          : { poolOption2: betData.poolOption2 + addAmount, bets2: targetBets };
-
-        await db.collection('active_bets').doc(betId).update(updatePayload);
-
-        // 即時刷新主 Embed
-        const newBetData = { ...betData, ...updatePayload };
-        await interaction.message.edit({ embeds: [createBetEmbed(newBetData)] });
+        await db.collection('active_bets').doc(betId).update({ options });
+        // 即時刷新主面板
+        await interaction.message.edit({ embeds: [createMultiBetEmbed({ ...betData, options })] });
 
         return await interaction.reply({
-          content: `✅ 成功下注 **${isOpt1 ? betData.option1 : betData.option2}** \`+100 萬 楓幣\`！(累計下注: ${formatMeso(currentBet + addAmount)})`,
+          content: `✅ 成功為 **${options[optIdx].name}** 下注 \`+100 萬 楓幣\`！(個人累計: ${formatMeso(currentBet + addAmount)})`,
           ephemeral: true
         });
+      }
+
+      // 3. 衝卷/多選項快捷 +100w
+      if (customId.startsWith('bet_act_100w_')) {
+        const betId = customId.replace('bet_act_100w_', '');
+        const selectedOptIdx = userSelectedJob.get(`bet_choice_${interaction.user.id}_${betId}`);
+        if (selectedOptIdx === undefined) return interaction.reply({ content: '⚠️ 請先在上方下拉選單點選你要下注的【選項】！', ephemeral: true });
+
+        const betDoc = await db.collection('active_bets').doc(betId).get();
+        if (!betDoc.exists) return interaction.reply({ content: '❌ 賭局已失效', ephemeral: true });
+        const betData = betDoc.data();
+
+        if (Date.now() >= betData.deadline) return interaction.reply({ content: '🛑 該賭局已截止下注！', ephemeral: true });
+
+        const addAmount = 1000000;
+        const userDoc = await fetchUserDocSafe(interaction.user.id);
+        const playerIgn = userDoc.mainIgn || interaction.user.displayName || interaction.user.username;
+
+        const options = betData.options;
+        const currentBet = options[selectedOptIdx].bets[interaction.user.id]?.amount || 0;
+        options[selectedOptIdx].bets[interaction.user.id] = { ign: playerIgn, amount: currentBet + addAmount };
+        options[selectedOptIdx].pool = (options[selectedOptIdx].pool || 0) + addAmount;
+
+        await db.collection('active_bets').doc(betId).update({ options });
+        await interaction.message.edit({ embeds: [createMultiBetEmbed({ ...betData, options })] });
+
+        return await interaction.reply({
+          content: `✅ 成功為 **${options[selectedOptIdx].name}** 下注 \`+100 萬 楓幣\`！(個人累計: ${formatMeso(currentBet + addAmount)})`,
+          ephemeral: true
+        });
+      }
+
+      // 4. 自訂金額彈窗
+      if (customId.startsWith('bet_custom_btn_')) {
+        const betId = customId.replace('bet_custom_btn_', '');
+        const betDoc = await db.collection('active_bets').doc(betId).get();
+        if (!betDoc.exists) return interaction.reply({ content: '❌ 賭局已失效', ephemeral: true });
+        const betData = betDoc.data();
+
+        if (Date.now() >= betData.deadline) return interaction.reply({ content: '🛑 該賭局已截止下注！', ephemeral: true });
+
+        const modal = new ModalBuilder().setCustomId(`modal_bet_custom_${betId}`).setTitle(`自訂下注金額`);
+        let descList = betData.options.map((opt, i) => `${i + 1}:${opt.name}`).join(' | ');
+        if (descList.length > 90) descList = descList.substring(0, 90) + '...';
+
+        const choiceInput = new TextInputBuilder()
+          .setCustomId('input_bet_choice')
+          .setLabel(`選擇選項編號 (1 ~ ${betData.options.length})`)
+          .setPlaceholder(`選項：${descList}`)
+          .setStyle(TextInputStyle.Short).setRequired(true);
+
+        const amountInput = new TextInputBuilder()
+          .setCustomId('input_bet_amount')
+          .setLabel(`下注金額 (支援 500w, 1e 或純數字)`)
+          .setPlaceholder(`例如：500w 或 5000000`)
+          .setStyle(TextInputStyle.Short).setRequired(true);
+
+        modal.addComponents(new ActionRowBuilder().addComponents(choiceInput), new ActionRowBuilder().addComponents(amountInput));
+        return await interaction.showModal(modal);
       }
     }
 
     // ----------------------------------------
-    // [C] 下拉選單切換
+    // [C] 下拉選單處理
     // ----------------------------------------
     if (interaction.isStringSelectMenu()) {
-      // 1. 賭局結算選單
-      if (interaction.customId.startsWith('settle_choice_')) {
+      if (interaction.customId.startsWith('bet_select_opt_')) {
+        const betId = interaction.customId.replace('bet_select_opt_', '');
+        const optIdx = parseInt(interaction.values[0]);
+        userSelectedJob.set(`bet_choice_${interaction.user.id}_${betId}`, optIdx);
+        return await interaction.reply({ content: `👉 已選中第 ${optIdx + 1} 個選項，現在可以點擊下方按鈕進行下注！`, ephemeral: true });
+      }
+
+      // 賭局結算執行 (含底池與 Pari-mutuel 精算)
+      if (interaction.customId.startsWith('settle_finalize_')) {
         await interaction.deferReply();
-        const betId = interaction.customId.replace('settle_choice_', '');
-        const winningChoice = interaction.values[0]; // 'opt1' or 'opt2'
+        const betId = interaction.customId.replace('settle_finalize_', '');
+        const winIdx = parseInt(interaction.values[0]);
 
         const betDoc = await db.collection('active_bets').doc(betId).get();
         if (!betDoc.exists) return interaction.editReply('❌ 賭局資料已失效。');
         const betData = betDoc.data();
 
-        const isOpt1Win = winningChoice === 'opt1';
-        const winTitle = isOpt1Win ? betData.option1 : betData.option2;
-        const winBets = isOpt1Win ? betData.bets1 : betData.bets2;
-        const loseBets = isOpt1Win ? betData.bets2 : betData.bets1;
-        const winPool = isOpt1Win ? betData.poolOption1 : betData.poolOption2;
-        const losePool = isOpt1Win ? betData.poolOption2 : betData.poolOption1;
+        const options = betData.options;
+        const winOption = options[winIdx];
 
-        // 計算彩池分紅
+        let playerPool = 0;
+        let winPool = winOption.pool || 0;
+        options.forEach(o => playerPool += (o.pool || 0));
+        
+        // 總彩池 = 玩家下注總和 + 發起人底池
+        const totalPool = playerPool + (betData.seedMoney || 0);
+        // 輸家與底池構成的分紅池 = 總彩池 - 贏家下注總本金
+        const bonusPool = totalPool - winPool;
+
         let resultsText = '```ansi\n';
-        resultsText += `\u001b[1;33m🏆 結算結果：【${winTitle}】獲勝！\u001b[0m\n\n`;
+        resultsText += `\u001b[1;33m🏆 最終結算：【${winOption.name}】獲勝！\u001b[0m\n\n`;
 
-        // 贏家清單 (綠色 32)
-        const winEntries = Object.entries(winBets || {});
-        if (winEntries.length > 0) {
+        // 贏家清單
+        const winBets = Object.entries(winOption.bets || {});
+        if (winBets.length > 0) {
           resultsText += `\u001b[1;32m=== 贏家名冊 (彩池加成派彩) ===\u001b[0m\n`;
-          for (const [uid, b] of winEntries) {
-            const shareRatio = winPool > 0 ? b.amount / winPool : 0;
-            const profit = Math.floor(shareRatio * losePool); // 分走輸家的比例
-            resultsText += `\u001b[0;32m[哪有賭狗天天輸_${b.ign}_下注:${formatMeso(b.amount)}_+${formatMeso(profit)}楓幣]\u001b[0m\n`;
+          for (const [uid, b] of winBets) {
+            const share = winPool > 0 ? (b.amount / winPool) * bonusPool : 0;
+            const totalReturn = b.amount + Math.floor(share);
+            resultsText += `\u001b[0;32m[哪有賭狗天天輸_${b.ign}_下注:${formatMeso(b.amount)}_+${formatMeso(Math.floor(share))}楓幣 (領回:${formatMeso(totalReturn)})]\u001b[0m\n`;
           }
         } else {
-          resultsText += `\u001b[0;32m無人押中獲勝方，彩池保留。\u001b[0m\n`;
+          resultsText += `\u001b[0;32m無人押中此選項，底池與彩池全數保留/退回。\u001b[0m\n`;
         }
 
-        // 輸家清單 (紅色 31)
-        const loseEntries = Object.entries(loseBets || {});
-        if (loseEntries.length > 0) {
-          resultsText += `\n\u001b[1;31m=== 輸家名冊 (通通沒收) ===\u001b[0m\n`;
-          for (const [uid, b] of loseEntries) {
-            resultsText += `\u001b[0;31m[賭狗賭狗賭到最後一無所有_${b.ign}_下注:${formatMeso(b.amount)}_-${formatMeso(b.amount)}楓幣]\u001b[0m\n`;
+        // 輸家清單
+        resultsText += `\n\u001b[1;31m=== 輸家名冊 (通通沒收) ===\u001b[0m\n`;
+        let hasLosers = false;
+        options.forEach((opt, idx) => {
+          if (idx !== winIdx) {
+            for (const [uid, b] of Object.entries(opt.bets || {})) {
+              hasLosers = true;
+              resultsText += `\u001b[0;31m[賭狗賭狗賭到最後一無所有_${b.ign}_下注:${formatMeso(b.amount)}_-${formatMeso(b.amount)}楓幣]\u001b[0m\n`;
+            }
           }
-        }
+        });
+        if (!hasLosers) resultsText += `\u001b[0;31m無輸家。\u001b[0m\n`;
 
         resultsText += '```';
 
@@ -542,20 +704,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const settleEmbed = new EmbedBuilder()
           .setColor(0xF1C40F)
-          .setTitle(`🎉【賭局結算公告】${betData.title}`)
-          .setDescription(`本局獲勝選項為：**【${winTitle}】**！\n總獎金池 \`${formatMeso(winPool + losePool)} 楓幣\` 已派發完畢！\n\n${resultsText}`);
+          .setTitle(`🎉【競猜結算公告】${betData.title}`)
+          .setDescription(`恭喜 **【${winOption.name}】** 成功開出！\n總獎金池 \`${formatMeso(totalPool)} 楓幣\` 已依照比例全數派發完畢！\n\n${resultsText}`);
 
         return await interaction.editReply({ embeds: [settleEmbed] });
       }
 
-      // 2. 職業名冊切換
       if (interaction.customId === 'select_query_job') {
         await interaction.deferUpdate();
         const embed = await generateJobEmbed(interaction.values[0]);
         return await interaction.editReply({ embeds: [embed], components: [buildJobQueryMenu()] });
       }
 
-      // 3. 報到職業選擇
       if (interaction.customId === 'select_job_register') {
         const val = interaction.values[0];
         const prevData = await fetchUserDocSafe(interaction.user.id);
@@ -576,48 +736,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // [D] Modal 表單提交
     // ----------------------------------------
     if (interaction.isModalSubmit()) {
-      // 1. 自訂下注金額送出
+      // 1. 自訂金額下注
       if (interaction.customId.startsWith('modal_bet_custom_')) {
         await interaction.deferReply({ ephemeral: true });
         const betId = interaction.customId.replace('modal_bet_custom_', '');
-        const choice = interaction.fields.getTextInputValue('input_bet_choice').trim();
-        const rawAmount = interaction.fields.getTextInputValue('input_bet_amount').toLowerCase().trim();
+        const choiceRaw = interaction.fields.getTextInputValue('input_bet_choice').trim();
+        const rawAmount = interaction.fields.getTextInputValue('input_bet_amount').trim();
 
-        let betAmount = 0;
-        if (rawAmount.includes('w') || rawAmount.includes('萬')) {
-          betAmount = parseInt(rawAmount.replace(/[^0-9]/g, '')) * 10000;
-        } else if (rawAmount.includes('e') || rawAmount.includes('億')) {
-          betAmount = parseInt(rawAmount.replace(/[^0-9]/g, '')) * 100000000;
-        } else {
-          betAmount = parseInt(rawAmount.replace(/[^0-9]/g, '')) || 0;
-        }
+        let optIdx = parseInt(choiceRaw) - 1;
+        const betAmount = parseMoneyInput(rawAmount);
 
-        if (betAmount <= 0) return interaction.editReply('❌ 下注金額格式無效，請填寫大於 0 的金額！');
+        if (betAmount <= 0) return interaction.editReply('❌ 下注金額格式無效，請填寫大於 0 的數字！');
 
         const betDoc = await db.collection('active_bets').doc(betId).get();
-        if (!betDoc.exists) return interaction.editReply('❌ 賭局已失效。');
+        if (!betDoc.exists) return interaction.editReply('❌ 賭局已失效');
         const betData = betDoc.data();
 
         if (Date.now() >= betData.deadline) return interaction.editReply('🛑 該賭局已截止下注！');
+        if (isNaN(optIdx) || optIdx < 0 || optIdx >= betData.options.length) return interaction.editReply(`❌ 選項編號無效，請填寫 1 ~ ${betData.options.length}！`);
 
-        const isOpt1 = choice === '1' || choice.includes(betData.option1);
-        const targetBets = isOpt1 ? betData.bets1 : betData.bets2;
         const userDoc = await fetchUserDocSafe(interaction.user.id);
         const playerIgn = userDoc.mainIgn || interaction.user.displayName || interaction.user.username;
 
-        const currentBet = targetBets[interaction.user.id]?.amount || 0;
-        targetBets[interaction.user.id] = { ign: playerIgn, amount: currentBet + betAmount };
+        const options = betData.options;
+        const currentBet = options[optIdx].bets[interaction.user.id]?.amount || 0;
+        options[optIdx].bets[interaction.user.id] = { ign: playerIgn, amount: currentBet + betAmount };
+        options[optIdx].pool = (options[optIdx].pool || 0) + betAmount;
 
-        const updatePayload = isOpt1
-          ? { poolOption1: betData.poolOption1 + betAmount, bets1: targetBets }
-          : { poolOption2: betData.poolOption2 + betAmount, bets2: targetBets };
-
-        await db.collection('active_bets').doc(betId).update(updatePayload);
-
-        return await interaction.editReply(`✅ 成功為 **${isOpt1 ? betData.option1 : betData.option2}** 下注 \`${formatMeso(betAmount)} 楓幣\`！(累計: ${formatMeso(currentBet + betAmount)})`);
+        await db.collection('active_bets').doc(betId).update({ options });
+        return await interaction.editReply(`✅ 成功為 **${options[optIdx].name}** 下注 \`${formatMeso(betAmount)} 楓幣\`！(個人累計: ${formatMeso(currentBet + betAmount)})`);
       }
 
-      // 2. 名冊更新送出
+      // 2. 名冊更新
       if (interaction.customId === 'modal_register_page1') {
         await interaction.deferReply();
         const mainIgn = interaction.fields.getTextInputValue('input_main_ign').trim();
@@ -680,7 +830,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         userSelectedJob.delete(interaction.user.id);
       }
 
-      // 3. 退休送出
+      // 3. 退休
       if (interaction.customId === 'modal_retire') {
         await interaction.deferReply();
         const ign = interaction.fields.getTextInputValue('input_retire_ign')?.trim() || interaction.user.displayName || interaction.user.username;

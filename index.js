@@ -20,7 +20,7 @@ const ROLES = {
   VERIFIED: '1540053101120323685',
   UNVERIFIED: '1540053110846791762',
   RETIRED: '1540327837947396166',
-  WARDEN_200: '1540337376994402376',
+  WARDEN_200: '1540337376994402376', // 尊榮的 Lv 200_典獄長
   JOBS: {
     '黑騎士': '1540050432796266526', '聖騎士': '1540051178396844153', '英雄': '1540051228459929631',
     '箭神': '1540051260005154967', '神射手': '1540051322525716601', '冰雷': '1540051347376832594',
@@ -32,7 +32,7 @@ const ROLES = {
 const userSelectedJob = new Map();
 
 // ==========================================
-// 2. 賭局工具模組
+// 2. 工具與債務最小化演算法
 // ==========================================
 
 function parseDeadline(inputStr) {
@@ -80,11 +80,57 @@ function formatMeso(amount) {
   return (amount || 0).toLocaleString();
 }
 
+// 債務最小化撮合演算法 (Greedy Net Balance Matching)
+function calculateMinTransfers(balances) {
+  const debtors = [];
+  const creditors = [];
+
+  for (const [id, data] of Object.entries(balances)) {
+    const net = Math.round(data.net);
+    if (net < -1) debtors.push({ id, ign: data.ign, amount: -net });
+    else if (net > 1) creditors.push({ id, ign: data.ign, amount: net });
+  }
+
+  debtors.sort((a, b) => b.amount - a.amount);
+  creditors.sort((a, b) => b.amount - a.amount);
+
+  const transfers = [];
+  let dIdx = 0;
+  let cIdx = 0;
+
+  while (dIdx < debtors.length && cIdx < creditors.length) {
+    const debtor = debtors[dIdx];
+    const creditor = creditors[cIdx];
+    const transferAmount = Math.min(debtor.amount, creditor.amount);
+
+    if (transferAmount > 0) {
+      transfers.push({
+        from: debtor.ign,
+        fromId: debtor.id,
+        to: creditor.ign,
+        toId: creditor.id,
+        amount: transferAmount
+      });
+
+      debtor.amount -= transferAmount;
+      creditor.amount -= transferAmount;
+    }
+
+    if (debtor.amount === 0) dIdx++;
+    if (creditor.amount === 0) cIdx++;
+  }
+
+  return transfers;
+}
+
+// ==========================================
+// 3. 賭局 UI 面板建構
+// ==========================================
+
 function createMultiBetEmbed(betData) {
   let playerPool = 0;
   betData.options.forEach(opt => playerPool += (opt.pool || 0));
   const totalPool = playerPool + (betData.seedMoney || 0);
-
   const isClosed = Date.now() >= betData.deadline;
 
   const embed = new EmbedBuilder()
@@ -92,20 +138,20 @@ function createMultiBetEmbed(betData) {
     .setTitle(betData.isScroll ? `📜【裝備衝卷競猜】${betData.title}` : `📖【技能書點擊賭局】${betData.title}`)
     .setDescription(
       `👑 **發起人**：<@${betData.creatorId}>\n` +
-      `🎁 **發起人加碼底池**：\`${formatMeso(betData.seedMoney || 0)} 楓幣\`\n` +
+      `🎁 **發起人底池**：\`${formatMeso(betData.seedMoney || 0)} 楓幣\`\n` +
       `⏳ **截止時間**：<t:${Math.floor(betData.deadline / 1000)}:R> (<t:${Math.floor(betData.deadline / 1000)}:F>)\n` +
-      `💰 **總獎金池 (底池+玩家)**：\`${formatMeso(totalPool)} 楓幣\`\n` +
-      `狀態：${isClosed ? '🔴 **已截止下注，等待結算**' : '🟢 **下注火熱進行中！賠率即時變動！**'}\n` +
+      `💰 **總獎金池**：\`${formatMeso(totalPool)} 楓幣\`\n` +
+      `狀態：${isClosed ? '🔴 **已截止下注，等待結算**' : '🟢 **下注進行中！賠率隨人數即時變動**'}\n` +
       `━━━━━━━━━━━━━━━━━━━━`
     )
-    .setFooter({ text: 'Pari-mutuel 共同彩池分紅制 | 輸家彩池將全數按比例派發給贏家' });
+    .setFooter({ text: 'Pari-mutuel 彩池分紅 | 結算時自動生成最省手續費轉帳清單' });
 
   betData.options.forEach((opt) => {
-    const odds = (opt.pool > 0) ? (totalPool / opt.pool).toFixed(2) : (totalPool > 0 ? '超高賠率(暫無人押)' : '1.00');
+    const odds = (opt.pool > 0) ? (totalPool / opt.pool).toFixed(2) : (totalPool > 0 ? '超高賠率' : '1.00');
     const userCount = Object.keys(opt.bets || {}).length;
     embed.addFields({
       name: `${opt.name}`,
-      value: `💵 目前彩池：\`${formatMeso(opt.pool || 0)}\`\n👥 下注人數：\`${userCount} 人\`\n📈 即時賠率：\`${odds}x\``,
+      value: `💵 彩池：\`${formatMeso(opt.pool || 0)}\`\n👥 人數：\`${userCount} 人\`\n📈 賠率：\`${odds}x\``,
       inline: true
     });
   });
@@ -149,7 +195,7 @@ async function hasActiveBet() {
 }
 
 // ==========================================
-// 3. 通用名冊工具模組
+// 4. 名冊與個人資料模組
 // ==========================================
 function buildMainSelectMenu() {
   const options = Object.keys(ROLES.JOBS).map(job =>
@@ -265,7 +311,7 @@ async function generateJobEmbed(targetJob) {
 }
 
 // ==========================================
-// 4. Express 伺服器 & Firebase
+// 5. Express 伺服器 & Firebase 初始化
 // ==========================================
 const app = express();
 app.get('/', (req, res) => res.send('Auto-Bot Online!'));
@@ -281,7 +327,7 @@ try {
 } catch (e) { console.error('❌ Firebase Error:', e.message); }
 
 // ==========================================
-// 5. 斜線指令註冊 (/發起賭局 技能書 / 衝卷)
+// 6. 斜線指令註冊
 // ==========================================
 const commands = [
   new SlashCommandBuilder()
@@ -298,7 +344,7 @@ const commands = [
       sub.setName('衝卷')
         .setDescription('發起裝備衝卷過幾卷競猜 (+0 ~ +10)')
         .addStringOption(o => o.setName('裝備名稱').setDescription('例如：紫色衝浪板、楓葉之盔').setRequired(true))
-        .addIntegerOption(o => o.setName('最大卷數').setDescription('該裝備總卷數上限 (例如：7 或 10)').setRequired(true).setMinValue(1).setMaxValue(10))
+        .addIntegerOption(o => o.setName('最大卷數').setDescription('該裝備總卷數上限 (例如：2、7 或 10)').setRequired(true).setMinValue(1).setMaxValue(10))
         .addStringOption(o => o.setName('截止時間').setDescription('填寫範例：15m、1h、20:00 等').setRequired(true))
         .addStringOption(o => o.setName('底池金額').setDescription('發起人自掏腰包加碼底池 (選填，例如：500w、1000w)').setRequired(false))
     ),
@@ -358,7 +404,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
 });
 
 // ==========================================
-// 6. 互動事件核心監聽
+// 7. 互動事件核心監聽
 // ==========================================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
@@ -368,7 +414,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isChatInputCommand()) {
       const { commandName } = interaction;
 
-      // 1. /發起賭局 (子指令：技能書 / 衝卷)
       if (commandName === '發起賭局') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
 
@@ -378,7 +423,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const subCommand = interaction.options.getSubcommand();
 
-        // 模式 A：技能書 (二選一)
+        // 1. 技能書模式
         if (subCommand === '技能書') {
           await interaction.deferReply();
           const bookName = interaction.options.getString('技能書名稱');
@@ -413,7 +458,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
         }
 
-        // 模式 B：衝卷 (+0 ~ +10)
+        // 2. 衝卷模式 (支援兩階段中 maxScroll=2 等情境)
         if (subCommand === '衝卷') {
           await interaction.deferReply();
           const equipName = interaction.options.getString('裝備名稱');
@@ -632,7 +677,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [C] 下拉選單處理
+    // [C] 下拉選單處理 (含最少交易分帳演算)
     // ----------------------------------------
     if (interaction.isStringSelectMenu()) {
       if (interaction.customId.startsWith('bet_select_opt_')) {
@@ -642,7 +687,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.reply({ content: `👉 已選中第 ${optIdx + 1} 個選項，現在可以點擊下方按鈕進行下注！`, ephemeral: true });
       }
 
-      // 賭局結算執行 (含底池與 Pari-mutuel 精算)
+      // 賭局結算執行 (Pari-mutuel 彩池 + 最少交易筆數撮合)
       if (interaction.customId.startsWith('settle_finalize_')) {
         await interaction.deferReply();
         const betId = interaction.customId.replace('settle_finalize_', '');
@@ -658,27 +703,48 @@ client.on(Events.InteractionCreate, async (interaction) => {
         let playerPool = 0;
         let winPool = winOption.pool || 0;
         options.forEach(o => playerPool += (o.pool || 0));
-        
+
         const totalPool = playerPool + (betData.seedMoney || 0);
         const bonusPool = totalPool - winPool;
 
+        // 計算每個人的淨盈虧 (Net Balance)
+        const balances = {}; // { userId: { ign, net } }
+
+        // 發起人底池計入 (若發起人無下注則淨支出底池)
+        if (betData.seedMoney > 0) {
+          balances[betData.creatorId] = {
+            ign: betData.creatorName || '發起人底池',
+            net: -(betData.seedMoney)
+          };
+        }
+
+        // 初始化所有下注者本金扣除
+        options.forEach(opt => {
+          for (const [uid, b] of Object.entries(opt.bets || {})) {
+            if (!balances[uid]) balances[uid] = { ign: b.ign, net: 0 };
+            balances[uid].net -= b.amount;
+          }
+        });
+
+        // 贏家分配總彩金
+        const winBets = Object.entries(winOption.bets || {});
         let resultsText = '```ansi\n';
         resultsText += `\u001b[1;33m🏆 最終結算：【${winOption.name}】獲勝！\u001b[0m\n\n`;
 
-        // 贏家清單
-        const winBets = Object.entries(winOption.bets || {});
         if (winBets.length > 0) {
           resultsText += `\u001b[1;32m=== 贏家名冊 (彩池加成派彩) ===\u001b[0m\n`;
           for (const [uid, b] of winBets) {
             const share = winPool > 0 ? (b.amount / winPool) * bonusPool : 0;
             const totalReturn = b.amount + Math.floor(share);
+            balances[uid].net += totalReturn; // 增加派彩
+
             resultsText += `\u001b[0;32m[哪有賭狗天天輸_${b.ign}_下注:${formatMeso(b.amount)}_+${formatMeso(Math.floor(share))}楓幣 (領回:${formatMeso(totalReturn)})]\u001b[0m\n`;
           }
         } else {
-          resultsText += `\u001b[0;32m無人押中此選項，底池與彩池全數保留/退回。\u001b[0m\n`;
+          resultsText += `\u001b[0;32m無人押中此選項，彩池全數保留/流局。\u001b[0m\n`;
         }
 
-        // 輸家清單
+        // 輸家名單
         resultsText += `\n\u001b[1;31m=== 輸家名冊 (通通沒收) ===\u001b[0m\n`;
         let hasLosers = false;
         options.forEach((opt, idx) => {
@@ -690,15 +756,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
         });
         if (!hasLosers) resultsText += `\u001b[0;31m無輸家。\u001b[0m\n`;
-
         resultsText += '```';
+
+        // 執行債務最小化演算法
+        const transfers = calculateMinTransfers(balances);
+        let transferGuide = `🧾 **【最少交易次數轉帳指引（共 ${transfers.length} 筆）】**\n*(依照以下指引在遊戲內交易，可大幅降低跑圖次數與官方手續費！)*\n\n`;
+
+        if (transfers.length === 0) {
+          transferGuide += `• 無需進行任何轉帳交易。`;
+        } else {
+          transfers.forEach((t, i) => {
+            transferGuide += `${i + 1}. ➡️ **${t.from}** 交易給 **${t.to}**：\`${formatMeso(t.amount)} 楓幣\``;
+            if (t.amount >= 10000000) {
+              transferGuide += ` *(💡 單筆達 1000w 以上，可協議拆單降手續費率)*`;
+            }
+            transferGuide += `\n`;
+          });
+        }
 
         await db.collection('active_bets').doc(betId).update({ isSettled: true });
 
         const settleEmbed = new EmbedBuilder()
           .setColor(0xF1C40F)
           .setTitle(`🎉【競猜結算公告】${betData.title}`)
-          .setDescription(`恭喜 **【${winOption.name}】** 成功開出！\n總獎金池 \`${formatMeso(totalPool)} 楓幣\` 已依照比例全數派發完畢！\n\n${resultsText}`);
+          .setDescription(`恭喜 **【${winOption.name}】** 成功開出！\n總獎金池 \`${formatMeso(totalPool)} 楓幣\` 已派發完畢！\n\n${resultsText}\n${transferGuide}`);
 
         return await interaction.editReply({ embeds: [settleEmbed] });
       }
@@ -729,7 +810,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // [D] Modal 表單提交
     // ----------------------------------------
     if (interaction.isModalSubmit()) {
-      // 1. 自訂金額下注
       if (interaction.customId.startsWith('modal_bet_custom_')) {
         await interaction.deferReply({ ephemeral: true });
         const betId = interaction.customId.replace('modal_bet_custom_', '');
@@ -760,7 +840,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`✅ 成功為 **${options[optIdx].name}** 下注 \`${formatMeso(betAmount)} 楓幣\`！(個人累計: ${formatMeso(currentBet + betAmount)})`);
       }
 
-      // 2. 名冊更新
       if (interaction.customId === 'modal_register_page1') {
         await interaction.deferReply();
         const mainIgn = interaction.fields.getTextInputValue('input_main_ign').trim();
@@ -823,7 +902,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         userSelectedJob.delete(interaction.user.id);
       }
 
-      // 3. 退休
       if (interaction.customId === 'modal_retire') {
         await interaction.deferReply();
         const ign = interaction.fields.getTextInputValue('input_retire_ign')?.trim() || interaction.user.displayName || interaction.user.username;
@@ -832,7 +910,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (db) {
           await db.collection('member_profiles').doc(interaction.user.id).set({
             userId: interaction.user.id, username: interaction.user.username,
-            mainIgn: ign, isRetired: true, timestamp: admin.firestore.FieldValue.serverTimestamp()
+            mainIgn, isRetired: true, timestamp: admin.firestore.FieldValue.serverTimestamp()
           }, { merge: true }).catch(() => {});
         }
 

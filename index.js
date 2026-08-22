@@ -20,7 +20,7 @@ const ROLES = {
   VERIFIED: '1540053101120323685',
   UNVERIFIED: '1540053110846791762',
   RETIRED: '1540327837947396166',
-  WARDEN_200: '1540337376994402376', // 尊榮的 Lv 200_典獄長
+  WARDEN_200: '1540337376994402376',
   JOBS: {
     '黑騎士': '1540050432796266526', '聖騎士': '1540051178396844153', '英雄': '1540051228459929631',
     '箭神': '1540051260005154967', '神射手': '1540051322525716601', '冰雷': '1540051347376832594',
@@ -32,10 +32,9 @@ const ROLES = {
 const userSelectedJob = new Map();
 
 // ==========================================
-// 2. 工具與賭局模組
+// 2. 賭局工具模組
 // ==========================================
 
-// 時間解析器：支援 10m, 2h, 1d, 21:30, 2026-08-23 20:00
 function parseDeadline(inputStr) {
   if (!inputStr) return null;
   const str = inputStr.trim().toLowerCase();
@@ -67,7 +66,6 @@ function parseDeadline(inputStr) {
   return null;
 }
 
-// 解析金額字串 (支援 500w, 1e, 5000000)
 function parseMoneyInput(rawStr) {
   if (!rawStr) return 0;
   const str = rawStr.toLowerCase().trim();
@@ -82,7 +80,6 @@ function formatMeso(amount) {
   return (amount || 0).toLocaleString();
 }
 
-// 產生賭局 Embed (含底池與即時賠率計算)
 function createMultiBetEmbed(betData) {
   let playerPool = 0;
   betData.options.forEach(opt => playerPool += (opt.pool || 0));
@@ -92,7 +89,7 @@ function createMultiBetEmbed(betData) {
 
   const embed = new EmbedBuilder()
     .setColor(isClosed ? 0x95A5A6 : 0xE67E22)
-    .setTitle(betData.isScroll ? `📜【裝備衝卷競猜】${betData.title}` : `🎲【社群即時賭局】${betData.title}`)
+    .setTitle(betData.isScroll ? `📜【裝備衝卷競猜】${betData.title}` : `📖【技能書點擊賭局】${betData.title}`)
     .setDescription(
       `👑 **發起人**：<@${betData.creatorId}>\n` +
       `🎁 **發起人加碼底池**：\`${formatMeso(betData.seedMoney || 0)} 楓幣\`\n` +
@@ -104,7 +101,6 @@ function createMultiBetEmbed(betData) {
     .setFooter({ text: 'Pari-mutuel 共同彩池分紅制 | 輸家彩池將全數按比例派發給贏家' });
 
   betData.options.forEach((opt) => {
-    // 即時賠率 = 總獎金池 / 該選項目前下注額
     const odds = (opt.pool > 0) ? (totalPool / opt.pool).toFixed(2) : (totalPool > 0 ? '超高賠率(暫無人押)' : '1.00');
     const userCount = Object.keys(opt.bets || {}).length;
     embed.addFields({
@@ -146,7 +142,6 @@ function createMultiBetComponents(betId, options) {
   }
 }
 
-// 檢查全伺服器是否有正在進行中的賭局
 async function hasActiveBet() {
   if (!db) return false;
   const snapshot = await db.collection('active_bets').where('isSettled', '==', false).get();
@@ -286,21 +281,27 @@ try {
 } catch (e) { console.error('❌ Firebase Error:', e.message); }
 
 // ==========================================
-// 5. 斜線指令註冊
+// 5. 斜線指令註冊 (/發起賭局 技能書 / 衝卷)
 // ==========================================
 const commands = [
-  new SlashCommandBuilder().setName('發起賭局').setDescription('發起二選一賭局 (同時間全服限一局)')
-    .addStringOption(o => o.setName('題目').setDescription('賭局題目 (例如：小明的三飛閃30能過嗎？)').setRequired(true))
-    .addStringOption(o => o.setName('選項1').setDescription('選項 1 (例如：會過)').setRequired(true))
-    .addStringOption(o => o.setName('選項2').setDescription('選項 2 (例如：爆掉)').setRequired(true))
-    .addStringOption(o => o.setName('截止時間').setDescription('填寫範例：30m(分)、2h(小時)、1d(天)、21:30、或 2026-08-23 20:00').setRequired(true))
-    .addStringOption(o => o.setName('底池金額').setDescription('發起人自掏腰包加碼底池 (選填，例如：500w、1000w)').setRequired(false)),
-  
-  new SlashCommandBuilder().setName('發起衝卷').setDescription('發起裝備衝卷過幾卷競猜 (+0 ~ +10)')
-    .addStringOption(o => o.setName('裝備名稱').setDescription('例如：紫色衝浪板、楓葉之盔').setRequired(true))
-    .addIntegerOption(o => o.setName('最大卷數').setDescription('該裝備總卷數上限 (例如：7 或 10)').setRequired(true).setMinValue(1).setMaxValue(10))
-    .addStringOption(o => o.setName('截止時間').setDescription('填寫範例：15m、1h、20:00 等').setRequired(true))
-    .addStringOption(o => o.setName('底池金額').setDescription('發起人自掏腰包加碼底池 (選填，例如：500w、1000w)').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('發起賭局')
+    .setDescription('發起社群競猜賭局 (同時間全服限一局)')
+    .addSubcommand(sub =>
+      sub.setName('技能書')
+        .setDescription('發起技能書點擊二選一賭局 (會過 / 爆掉)')
+        .addStringOption(o => o.setName('技能書名稱').setDescription('例如：三飛閃30、四連箭30、暴風神射30').setRequired(true))
+        .addStringOption(o => o.setName('截止時間').setDescription('填寫範例：15m、30m、1h、21:30 等').setRequired(true))
+        .addStringOption(o => o.setName('底池金額').setDescription('發起人自掏腰包加碼底池 (選填，例如：500w、1000w)').setRequired(false))
+    )
+    .addSubcommand(sub =>
+      sub.setName('衝卷')
+        .setDescription('發起裝備衝卷過幾卷競猜 (+0 ~ +10)')
+        .addStringOption(o => o.setName('裝備名稱').setDescription('例如：紫色衝浪板、楓葉之盔').setRequired(true))
+        .addIntegerOption(o => o.setName('最大卷數').setDescription('該裝備總卷數上限 (例如：7 或 10)').setRequired(true).setMinValue(1).setMaxValue(10))
+        .addStringOption(o => o.setName('截止時間').setDescription('填寫範例：15m、1h、20:00 等').setRequired(true))
+        .addStringOption(o => o.setName('底池金額').setDescription('發起人自掏腰包加碼底池 (選填，例如：500w、1000w)').setRequired(false))
+    ),
 
   new SlashCommandBuilder().setName('幸運頻道').setDescription('抽取今日幸運頻道')
     .addIntegerOption(o => o.setName('最大頻道').setDescription('最大頻道數').setRequired(true).setMinValue(1)),
@@ -367,94 +368,89 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isChatInputCommand()) {
       const { commandName } = interaction;
 
-      // 1. 發起二選一賭局
+      // 1. /發起賭局 (子指令：技能書 / 衝卷)
       if (commandName === '發起賭局') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
 
-        // 檢查是否已有進行中的局
         if (await hasActiveBet()) {
           return interaction.reply({ content: '⚠️ **伺服器目前已有正在進行中的賭局！**\n為了維持秩序與彩池集中，請等待當前賭局結算後再開新局！', ephemeral: true });
         }
 
-        await interaction.deferReply();
+        const subCommand = interaction.options.getSubcommand();
 
-        const title = interaction.options.getString('題目');
-        const opt1 = interaction.options.getString('選項1');
-        const opt2 = interaction.options.getString('選項2');
-        const rawDeadline = interaction.options.getString('截止時間');
-        const rawSeed = interaction.options.getString('底池金額');
-        
-        const deadline = parseDeadline(rawDeadline);
-        const seedMoney = parseMoneyInput(rawSeed);
+        // 模式 A：技能書 (二選一)
+        if (subCommand === '技能書') {
+          await interaction.deferReply();
+          const bookName = interaction.options.getString('技能書名稱');
+          const rawDeadline = interaction.options.getString('截止時間');
+          const rawSeed = interaction.options.getString('底池金額');
 
-        if (!deadline) return interaction.editReply('❌ 時間格式無效！請輸入如 `30m`、`2h`、`1d`、`21:30`。');
+          const deadline = parseDeadline(rawDeadline);
+          const seedMoney = parseMoneyInput(rawSeed);
 
-        const betDocRef = db.collection('active_bets').doc();
-        const options = [
-          { name: `🟢 ${opt1}`, pool: 0, bets: {} },
-          { name: `🔴 ${opt2}`, pool: 0, bets: {} }
-        ];
+          if (!deadline) return interaction.editReply('❌ 時間格式無效！請輸入如 `15m`、`30m`、`1h`、`21:30`。');
 
-        const betData = {
-          id: betDocRef.id,
-          creatorId: interaction.user.id,
-          creatorName: interaction.user.username,
-          title, options, deadline, seedMoney,
-          isScroll: false, isSettled: false,
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        };
+          const betDocRef = db.collection('active_bets').doc();
+          const options = [
+            { name: `🟢 會過`, pool: 0, bets: {} },
+            { name: `🔴 爆掉`, pool: 0, bets: {} }
+          ];
 
-        await betDocRef.set(betData);
-        return await interaction.editReply({
-          embeds: [createMultiBetEmbed(betData)],
-          components: createMultiBetComponents(betDocRef.id, options)
-        });
-      }
+          const betData = {
+            id: betDocRef.id,
+            creatorId: interaction.user.id,
+            creatorName: interaction.user.username,
+            title: `【${bookName}】能不能點過？`,
+            options, deadline, seedMoney,
+            isScroll: false, isSettled: false,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          };
 
-      // 2. 發起裝備衝卷競猜
-      if (commandName === '發起衝卷') {
-        if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
-
-        if (await hasActiveBet()) {
-          return interaction.reply({ content: '⚠️ **伺服器目前已有正在進行中的賭局！**\n請等待當前賭局結算後再開新局！', ephemeral: true });
+          await betDocRef.set(betData);
+          return await interaction.editReply({
+            embeds: [createMultiBetEmbed(betData)],
+            components: createMultiBetComponents(betDocRef.id, options)
+          });
         }
 
-        await interaction.deferReply();
+        // 模式 B：衝卷 (+0 ~ +10)
+        if (subCommand === '衝卷') {
+          await interaction.deferReply();
+          const equipName = interaction.options.getString('裝備名稱');
+          const maxScroll = interaction.options.getInteger('最大卷數');
+          const rawDeadline = interaction.options.getString('截止時間');
+          const rawSeed = interaction.options.getString('底池金額');
 
-        const equipName = interaction.options.getString('裝備名稱');
-        const maxScroll = interaction.options.getInteger('最大卷數');
-        const rawDeadline = interaction.options.getString('截止時間');
-        const rawSeed = interaction.options.getString('底池金額');
+          const deadline = parseDeadline(rawDeadline);
+          const seedMoney = parseMoneyInput(rawSeed);
 
-        const deadline = parseDeadline(rawDeadline);
-        const seedMoney = parseMoneyInput(rawSeed);
+          if (!deadline) return interaction.editReply('❌ 時間格式無效！請輸入如 `15m`、`1h`、`20:00`。');
 
-        if (!deadline) return interaction.editReply('❌ 時間格式無效！請輸入如 `15m`、`1h`、`20:00`。');
+          const options = [];
+          for (let i = 0; i <= maxScroll; i++) {
+            let label = `+${i} 卷`;
+            if (i === 0) label = `💀 +0 (全爆)`;
+            else if (i === maxScroll) label = `👑 +${i} (完美神裝)`;
+            options.push({ name: label, pool: 0, bets: {} });
+          }
 
-        const options = [];
-        for (let i = 0; i <= maxScroll; i++) {
-          let label = `+${i} 卷`;
-          if (i === 0) label = `💀 +0 (全爆)`;
-          else if (i === maxScroll) label = `👑 +${i} (完美神裝)`;
-          options.push({ name: label, pool: 0, bets: {} });
+          const betDocRef = db.collection('active_bets').doc();
+          const betData = {
+            id: betDocRef.id,
+            creatorId: interaction.user.id,
+            creatorName: interaction.user.username,
+            title: `【${equipName}】能過幾卷？(上限 +${maxScroll})`,
+            options, deadline, seedMoney,
+            isScroll: true, isSettled: false,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          };
+
+          await betDocRef.set(betData);
+          return await interaction.editReply({
+            embeds: [createMultiBetEmbed(betData)],
+            components: createMultiBetComponents(betDocRef.id, options)
+          });
         }
-
-        const betDocRef = db.collection('active_bets').doc();
-        const betData = {
-          id: betDocRef.id,
-          creatorId: interaction.user.id,
-          creatorName: interaction.user.username,
-          title: `【${equipName}】能過幾卷？(上限 +${maxScroll})`,
-          options, deadline, seedMoney,
-          isScroll: true, isSettled: false,
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        };
-
-        await betDocRef.set(betData);
-        return await interaction.editReply({
-          embeds: [createMultiBetEmbed(betData)],
-          components: createMultiBetComponents(betDocRef.id, options)
-        });
       }
 
       if (commandName === '幸運頻道') {
@@ -567,7 +563,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         options[optIdx].pool = (options[optIdx].pool || 0) + addAmount;
 
         await db.collection('active_bets').doc(betId).update({ options });
-        // 即時刷新主面板
         await interaction.message.edit({ embeds: [createMultiBetEmbed({ ...betData, options })] });
 
         return await interaction.reply({
@@ -664,9 +659,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         let winPool = winOption.pool || 0;
         options.forEach(o => playerPool += (o.pool || 0));
         
-        // 總彩池 = 玩家下注總和 + 發起人底池
         const totalPool = playerPool + (betData.seedMoney || 0);
-        // 輸家與底池構成的分紅池 = 總彩池 - 贏家下注總本金
         const bonusPool = totalPool - winPool;
 
         let resultsText = '```ansi\n';

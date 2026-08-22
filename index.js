@@ -31,7 +31,25 @@ const ROLES = {
 
 const userChoiceMap = new Map();
 
-// 淒慘搞笑文案生成器
+// 乾爹乾媽救濟文案庫 (隨機抽取，不重複風格)
+const DONOR_ACTIONS = [
+  "救濟了發起人一碗暖心熱湯",
+  "贊助了發起人一整包強力吸水面紙",
+  "請發起人喝了一杯全糖壓驚珍奶",
+  "施捨了發起人一張回村卷軸買水錢",
+  "為發起人送上了一份心靈創傷慰問金",
+  "贊助了發起人鐵匠維修槌磨損補貼",
+  "施捨了發起人買包止痛藥冷靜一下",
+  "贊助了發起人技能書骨灰罈安葬費",
+  "請發起人吃了一頓粗飽滷肉飯壓壓驚",
+  "贊助了發起人一件保暖衛生衣防止著涼"
+];
+
+function getRandomDonorAction() {
+  return DONOR_ACTIONS[Math.floor(Math.random() * DONOR_ACTIONS.length)];
+}
+
+// 彈窗引導文案庫
 const PITY_TEXTS = {
   scroll: [
     "贊助苦主買包面紙擦眼淚...",
@@ -162,7 +180,7 @@ function createMultiBetEmbed(betData) {
       `狀態：${statusText}\n` +
       `━━━━━━━━━━━━━━━━━━━━`
     )
-    .setFooter({ text: 'Pari-mutuel 彩池分紅 | 輸家彩池將全數按比例派發給贏家' });
+    .setFooter({ text: 'Pari-mutuel 彩池分紅 | 結算時自動生成最少交易轉帳清單' });
 
   betData.options.forEach((opt) => {
     const odds = (opt.pool > 0) ? (totalPool / opt.pool).toFixed(2) : (totalPool > 0 ? '超高賠率' : '1.00');
@@ -593,7 +611,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [B] 按鈕處理 (下注、同情抖內、管理員操作)
+    // [B] 按鈕處理
     // ----------------------------------------
     if (interaction.isButton()) {
       const customId = interaction.customId;
@@ -661,7 +679,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // 同情抖內按鈕 (技能書 + 衝卷皆適用)
+      // 同情抖內按鈕
       if (customId.startsWith('bet_pity_donate_')) {
         const betId = customId.replace('bet_pity_donate_', '');
         const betDoc = await db.collection('active_bets').doc(betId).get();
@@ -786,7 +804,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.reply({ content: `👉 已選中第 ${optIdx + 1} 個選項，現在可點擊下方按鈕下注！`, ephemeral: true });
       }
 
-      // 賭局結算執行
+      // 賭局結算執行 (包含乾爹乾媽名冊輸出)
       if (interaction.customId.startsWith('settle_finalize_')) {
         await interaction.deferReply();
         const betId = interaction.customId.replace('settle_finalize_', '');
@@ -845,6 +863,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
         });
         if (!hasLosers) resultsText += `\u001b[0;31m無輸家。\u001b[0m\n`;
+
+        // 🌟 判定暴死，追加公開「乾爹乾媽名冊」
+        const isBust = winOption.name.includes('+0') || winOption.name.includes('全爆') || winOption.name.includes('爆掉');
+        const donations = Object.entries(betData.pityDonations || {});
+
+        if (isBust && donations.length > 0) {
+          resultsText += `\n\u001b[1;35m=== 乾爹乾媽名冊 (功德無量暖心救濟） ===\u001b[0m\n`;
+          donations.forEach(([uid, d]) => {
+            const action = getRandomDonorAction();
+            resultsText += `\u001b[0;35m[${d.ign}_${action}_+${formatMeso(d.amount)}楓幣]\u001b[0m\n`;
+          });
+        }
+
         resultsText += '```';
 
         const transfers = calculateMinTransfers(balances);
@@ -869,10 +900,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         await interaction.editReply({ embeds: [settleEmbed] });
 
-        // 判定暴死（+0 或 技能書爆掉）私密發送抖內救濟
-        const isBust = winOption.name.includes('+0') || winOption.name.includes('全爆') || winOption.name.includes('爆掉');
+        // 私密發送救濟金彙總給發起人苦主
         if (isBust) {
-          const donations = Object.entries(betData.pityDonations || {});
           let pityText = `😭 **【暴死深切救濟清單】**\n${getRandomPity(betData.isScroll ? 'scroll' : 'book')}\n以下是好心人給你的同情救濟金，請自行找他們領取買藥：\n\n`;
           let totalPity = 0;
           if (donations.length > 0) {
@@ -939,7 +968,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         pityDonations[interaction.user.id] = { ign: playerIgn, amount: donateAmount };
 
         await db.collection('active_bets').doc(betId).update({ pityDonations });
-        return await interaction.editReply(`🩹 已成功登記同情救濟 \`${formatMeso(donateAmount)} 楓幣\`！\n*(若最終暴死，系統會私密通知苦主領取，其餘人看不到此金額)*`);
+        return await interaction.editReply(`🩹 已成功登記同情救濟 \`${formatMeso(donateAmount)} 楓幣\`！\n*(若最終暴死，系統會公開乾爹乾媽名冊，並私密通知苦主領取)*`);
       }
 
       // 自訂下注提交

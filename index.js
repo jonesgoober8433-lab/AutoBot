@@ -239,6 +239,24 @@ function createPartyBuffModal(partyId, charIgn, charJob, charLevel) {
   return modal;
 }
 
+// 輔助更新團練主訊息
+async function updatePartyMainMessage(partyData, newMembers, isClosed = false) {
+  if (partyData.channelId && partyData.messageId) {
+    try {
+      const channel = await client.channels.fetch(partyData.channelId);
+      if (channel && channel.isTextBased()) {
+        const msg = await channel.messages.fetch(partyData.messageId);
+        await msg.edit({
+          embeds: [createPartyEmbed({ ...partyData, members: newMembers, isClosed })],
+          components: createPartyComponents(partyData.id, isClosed)
+        });
+      }
+    } catch (e) {
+      console.error('更新團練主面板失敗:', e.message);
+    }
+  }
+}
+
 // ==========================================
 // 4. 賭局 UI 面板建構
 // ==========================================
@@ -412,14 +430,10 @@ async function generateJobEmbed(targetJob) {
       const charList = [];
       for (const m of members) {
         if (m.isRetired) continue;
-        if (m.mainJob === jobName) {
-          charList.push({ text: `\`(${m.mainIgn}_Lv.${m.mainLevel})\` <@${m.userId}> **【本】**`, level: parseInt(m.mainLevel) || 0 });
-        }
+        if (m.mainJob === jobName) charList.push({ text: `\`(${m.mainIgn}_Lv.${m.mainLevel})\` <@${m.userId}> **【本】**`, level: parseInt(m.mainLevel) || 0 });
         if (m.subs && Array.isArray(m.subs)) {
           m.subs.forEach(s => {
-            if (s?.job === jobName) {
-              charList.push({ text: `\`(${s.ign}_Lv.${s.level})\` <@${m.userId}> *(本尊: ${m.mainIgn})*`, level: parseInt(s.level) || 0 });
-            }
+            if (s?.job === jobName) charList.push({ text: `\`(${s.ign}_Lv.${s.level})\` <@${m.userId}> *(本尊: ${m.mainIgn})*`, level: parseInt(s.level) || 0 });
           });
         }
       }
@@ -616,24 +630,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
           createdAt: admin.firestore.FieldValue.serverTimestamp()
         };
 
-        await partyRef.set(partyData);
-        return await interaction.editReply({
+        const msg = await interaction.editReply({
           embeds: [createPartyEmbed(partyData)],
           components: createPartyComponents(partyRef.id, false)
         });
+
+        // 記錄 messageId 與 channelId 以便後續自動同步主看板
+        partyData.channelId = interaction.channelId;
+        partyData.messageId = msg.id;
+        await partyRef.set(partyData);
+        return;
       }
 
-      // 2. /查看團練
+      // 2. /查看團練 (免 Firebase composite 索引)
       if (commandName === '查看團練') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
         await interaction.deferReply();
 
-        const snap = await db.collection('party_trainings').where('isClosed', '==', false).orderBy('createdAt', 'desc').limit(5).get();
+        const snap = await db.collection('party_trainings').where('isClosed', '==', false).get();
         if (snap.empty) return interaction.editReply('📜 目前沒有進行招募中的團練，使用 `/團練` 發起一個吧！');
 
+        const docs = [];
+        snap.forEach(doc => docs.push(doc.data()));
+        docs.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
+
         const partyListEmbed = new EmbedBuilder().setColor(0x3498DB).setTitle('⚔️【進行中團練總覽】');
-        snap.forEach(doc => {
-          const d = doc.data();
+        docs.slice(0, 5).forEach(d => {
           const memberCount = d.members?.length || 0;
           const buffPool = [];
           (d.members || []).forEach(m => {
@@ -792,12 +814,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [B] 按鈕處理 (直接秒開 Modal，絕不卡死)
+    // [B] 按鈕處理
     // ----------------------------------------
     if (interaction.isButton()) {
       const customId = interaction.customId;
 
-      // 1. 團練報名按鈕 (彈出帶按鈕的角色選單卡片)
+      // 1. 團練報名按鈕
       if (customId.startsWith('party_join_')) {
         const partyId = customId.replace('party_join_', '');
         const partyDoc = await db.collection('party_trainings').doc(partyId).get();
@@ -847,11 +869,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // 點擊特定角色按鈕 -> 100% 秒開 Modal 表單
+      // 點擊特定角色按鈕 -> 100% 秒開 Modal
       if (customId.startsWith('party_reg_char_')) {
         const parts = customId.split('_');
         const partyId = parts[3];
-        const type = parts[4]; // 'main', 'sub', 'custom'
+        const type = parts[4];
 
         const prevData = await fetchUserDocSafe(interaction.user.id);
         let charIgn = prevData.mainIgn || interaction.user.displayName;
@@ -881,7 +903,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const newMembers = (partyData.members || []).filter(m => m.userId !== interaction.user.id);
 
         await db.collection('party_trainings').doc(partyId).update({ members: newMembers });
-        await interaction.message.edit({ embeds: [createPartyEmbed({ ...partyData, members: newMembers })] });
+        await updatePartyMainMessage(partyData, newMembers, partyData.isClosed);
 
         return await interaction.reply({ content: '✅ 已為您取消報名此團練！', ephemeral: true });
       }
@@ -899,10 +921,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!isCreator && !isAdmin) return interaction.reply({ content: '❌ 只有主揪隊長或管理員可關閉揪團！', ephemeral: true });
 
         await db.collection('party_trainings').doc(partyId).update({ isClosed: true });
-        await interaction.message.edit({
-          embeds: [createPartyEmbed({ ...partyData, isClosed: true })],
-          components: createPartyComponents(partyId, true)
-        });
+        await updatePartyMainMessage(partyData, partyData.members || [], true);
 
         return await interaction.reply({ content: '🔒 團練揪團已成功關閉！祝各位冒險家練等順利！', ephemeral: true });
       }
@@ -1224,7 +1243,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [D] Modal 表單提交
+    // [D] Modal 表單提交 (修復並保證回覆)
     // ----------------------------------------
     if (interaction.isModalSubmit()) {
       // 1. 團練 Buff 登記
@@ -1264,7 +1283,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         members.push({ userId: interaction.user.id, ign, job, level, buffs, extraDevice });
 
         await db.collection('party_trainings').doc(partyId).update({ members });
-        await interaction.message.edit({ embeds: [createPartyEmbed({ ...partyData, members })] });
+        await updatePartyMainMessage(partyData, members, partyData.isClosed);
 
         return await interaction.editReply(`🎉 成功加入【${partyData.target}】團練！\n角色：\`${ign}\` (${job} Lv.${level})\nBuff：\`${Object.entries(buffs).map(([k, v]) => `${k}:${v}`).join(', ')}\`${extraDevice ? `\n自帶支援：\`${extraDevice}\`` : ''}`);
       }

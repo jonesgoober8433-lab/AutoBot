@@ -29,10 +29,33 @@ const ROLES = {
   }
 };
 
-const userSelectedJob = new Map();
+const userChoiceMap = new Map();
+
+// 淒慘搞笑文案生成器
+const PITY_TEXTS = {
+  scroll: [
+    "贊助苦主買包面紙擦眼淚...",
+    "給衝浪板買個好一點的骨灰罈...",
+    "全爆補助金：給老哥買碗熱湯喝...",
+    "給鐵匠維修槌子的磨損費...",
+    "純情施捨：至少回村買水不用跟人借錢..."
+  ],
+  book: [
+    "贊助苦主吸收技能書灰燼的心理治療費...",
+    "三飛閃/暴風神射火化費救濟金...",
+    "恭喜獲得『純粹的白光碎片』，贊助買糖吃...",
+    "技能書爆破受害者保護協會慰問金...",
+    "給可憐人買本初級數學教科書冷靜一下..."
+  ]
+};
+
+function getRandomPity(type) {
+  const list = PITY_TEXTS[type] || PITY_TEXTS.scroll;
+  return list[Math.floor(Math.random() * list.length)];
+}
 
 // ==========================================
-// 2. 工具與債務最小化演算法
+// 2. 輔助與演算法工具
 // ==========================================
 
 function parseDeadline(inputStr) {
@@ -103,22 +126,13 @@ function calculateMinTransfers(balances) {
     const transferAmount = Math.min(debtor.amount, creditor.amount);
 
     if (transferAmount > 0) {
-      transfers.push({
-        from: debtor.ign,
-        fromId: debtor.id,
-        to: creditor.ign,
-        toId: creditor.id,
-        amount: transferAmount
-      });
-
+      transfers.push({ from: debtor.ign, to: creditor.ign, amount: transferAmount });
       debtor.amount -= transferAmount;
       creditor.amount -= transferAmount;
     }
-
     if (debtor.amount === 0) dIdx++;
     if (creditor.amount === 0) cIdx++;
   }
-
   return transfers;
 }
 
@@ -130,20 +144,25 @@ function createMultiBetEmbed(betData) {
   let playerPool = 0;
   betData.options.forEach(opt => playerPool += (opt.pool || 0));
   const totalPool = playerPool + (betData.seedMoney || 0);
-  const isClosed = Date.now() >= betData.deadline;
+  const now = Date.now();
+  const isExpired = now >= betData.deadline;
+
+  let statusText = '🟢 **下注進行中！賠率即時跳動**';
+  if (betData.isPaused) statusText = '⏸️ **管理員已暫停下注**';
+  else if (isExpired) statusText = '🔴 **已截止下注，等待結算**';
 
   const embed = new EmbedBuilder()
-    .setColor(isClosed ? 0x95A5A6 : 0xE67E22)
+    .setColor(betData.isPaused ? 0xE74C3C : (isExpired ? 0x95A5A6 : 0xE67E22))
     .setTitle(betData.isScroll ? `📜【裝備衝卷競猜】${betData.title}` : `📖【技能書點擊賭局】${betData.title}`)
     .setDescription(
       `👑 **發起人**：<@${betData.creatorId}>\n` +
       `🎁 **發起人底池**：\`${formatMeso(betData.seedMoney || 0)} 楓幣\`\n` +
       `⏳ **截止時間**：<t:${Math.floor(betData.deadline / 1000)}:R> (<t:${Math.floor(betData.deadline / 1000)}:F>)\n` +
       `💰 **總獎金池**：\`${formatMeso(totalPool)} 楓幣\`\n` +
-      `狀態：${isClosed ? '🔴 **已截止下注，等待結算**' : '🟢 **下注進行中！賠率隨人數即時變動**'}\n` +
+      `狀態：${statusText}\n` +
       `━━━━━━━━━━━━━━━━━━━━`
     )
-    .setFooter({ text: 'Pari-mutuel 彩池分紅 | 結算時自動生成最少交易轉帳清單' });
+    .setFooter({ text: 'Pari-mutuel 彩池分紅 | 輸家彩池將全數按比例派發給贏家' });
 
   betData.options.forEach((opt) => {
     const odds = (opt.pool > 0) ? (totalPool / opt.pool).toFixed(2) : (totalPool > 0 ? '超高賠率' : '1.00');
@@ -159,44 +178,52 @@ function createMultiBetEmbed(betData) {
 }
 
 function createMultiBetComponents(betId, options, isScroll = false) {
-  if (options.length <= 3 && !isScroll) {
+  const isMulti = options.length > 3 || isScroll;
+
+  if (!isMulti) {
     const row1 = new ActionRowBuilder();
     options.forEach((opt, idx) => {
       row1.addComponents(
         new ButtonBuilder().setCustomId(`bet_quick_${betId}_${idx}`).setLabel(`${opt.name} (+100w)`).setStyle(ButtonStyle.Primary)
       );
     });
+    row1.addComponents(
+      new ButtonBuilder().setCustomId(`bet_custom_btn_${betId}`).setLabel('✏️ 自訂下注').setStyle(ButtonStyle.Success)
+    );
+
     const row2 = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`bet_custom_btn_${betId}`).setLabel('✏️ 自訂金額下注').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`bet_settle_btn_${betId}`).setLabel('⚖️ 一鍵結算').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId(`bet_pity_donate_${betId}`).setLabel('🩹 暴死同情抖內').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`bet_settle_btn_${betId}`).setLabel('⚖️ 結算').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`bet_admin_pause_${betId}`).setLabel('⏸️ 暫停/恢復').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`bet_admin_delete_${betId}`).setLabel('🗑️ 廢除').setStyle(ButtonStyle.Danger)
     );
     return [row1, row2];
   } else {
-    // 衝卷 / 多選項全面使用下拉選單
     const selectOptions = options.map((opt, idx) =>
       new StringSelectMenuOptionBuilder().setLabel(opt.name).setValue(`${idx}`).setDescription(`選擇投注【${opt.name}】`)
     );
     const row1 = new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder().setCustomId(`bet_select_opt_${betId}`).setPlaceholder('🔽 請先點此選擇你要押注的過卷數 / 選項').addOptions(selectOptions)
+      new StringSelectMenuBuilder().setCustomId(`bet_select_opt_${betId}`).setPlaceholder('🔽 請先點此選擇你要押注的選項/過卷數').addOptions(selectOptions)
     );
     const row2 = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`bet_act_100w_${betId}`).setLabel('💵 快捷下注 +100w').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`bet_custom_btn_${betId}`).setLabel('✏️ 自訂金額下注').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`bet_pity_donate_${betId}`).setLabel('🩹 +0 暴死同情抖內').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`bet_settle_btn_${betId}`).setLabel('⚖️ 一鍵結算').setStyle(ButtonStyle.Danger)
+      new ButtonBuilder().setCustomId(`bet_act_100w_${betId}`).setLabel('💵 快捷 +100w').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`bet_custom_btn_${betId}`).setLabel('✏️ 自訂下注').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`bet_pity_donate_${betId}`).setLabel('🩹 暴死同情抖內').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`bet_settle_btn_${betId}`).setLabel('⚖️ 結算').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`bet_admin_delete_${betId}`).setLabel('🗑️ 廢除').setStyle(ButtonStyle.Danger)
     );
     return [row1, row2];
   }
 }
 
-async function hasActiveBet() {
-  if (!db) return false;
-  const snapshot = await db.collection('active_bets').where('isSettled', '==', false).get();
-  return !snapshot.empty;
+async function getActiveBetDoc() {
+  if (!db) return null;
+  const snap = await db.collection('active_bets').where('isSettled', '==', false).limit(1).get();
+  return snap.empty ? null : snap.docs[0];
 }
 
 // ==========================================
-// 4. 名冊與個人資料模組
+// 4. 名冊工具模組
 // ==========================================
 function buildMainSelectMenu() {
   const options = Object.keys(ROLES.JOBS).map(job =>
@@ -250,7 +277,7 @@ async function fetchUserDocSafe(userId) {
 }
 
 function createRegisterModal(selectedJob, prevData) {
-  const modal = new ModalBuilder().setCustomId('modal_register_page1').setTitle(`資料填寫 (主職：${selectedJob})`);
+  const modal = new ModalBuilder().setCustomId('modal_register_page1').setTitle(`名冊更新 (主職：${selectedJob})`);
   modal.addComponents(
     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_main_ign').setLabel('1. 本尊遊戲ID (必填)').setStyle(TextInputStyle.Short).setValue(prevData.mainIgn || '').setRequired(true)),
     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_main_level').setLabel('2. 本尊等級 (必填)').setStyle(TextInputStyle.Short).setValue(prevData.mainLevel || '').setRequired(true)),
@@ -312,7 +339,7 @@ async function generateJobEmbed(targetJob) {
 }
 
 // ==========================================
-// 5. Express 伺服器 & Firebase 初始化
+// 5. Express 伺服器 & Firebase
 // ==========================================
 const app = express();
 app.get('/', (req, res) => res.send('Auto-Bot Online!'));
@@ -336,10 +363,10 @@ const commands = [
     .setDescription('發起社群競猜賭局 (同時間全服限一局)')
     .addSubcommand(sub =>
       sub.setName('技能書')
-        .setDescription('發起技能書點擊二選一賭局 (會過 / 爆掉)')
-        .addStringOption(o => o.setName('技能書名稱').setDescription('例如：三飛閃30、四連箭30、暴風神射30').setRequired(true))
+        .setDescription('發起技能書點擊賭局 (會過 / 爆掉)')
+        .addStringOption(o => o.setName('技能書名稱').setDescription('例如：三飛閃30、暴風神射30').setRequired(true))
         .addStringOption(o => o.setName('截止時間').setDescription('填寫範例：15m、30m、1h、21:30 等').setRequired(true))
-        .addStringOption(o => o.setName('底池金額').setDescription('發起人自掏腰包加碼底池 (選填，例如：500w、1000w)').setRequired(false))
+        .addStringOption(o => o.setName('底池金額').setDescription('加碼底池 (選填，例如：500w、1000w)').setRequired(false))
     )
     .addSubcommand(sub =>
       sub.setName('衝卷')
@@ -347,9 +374,10 @@ const commands = [
         .addStringOption(o => o.setName('裝備名稱').setDescription('例如：紫色衝浪板、楓葉之盔').setRequired(true))
         .addIntegerOption(o => o.setName('最大卷數').setDescription('該裝備總卷數上限 (例如：2、7 或 10)').setRequired(true).setMinValue(1).setMaxValue(10))
         .addStringOption(o => o.setName('截止時間').setDescription('填寫範例：15m、1h、20:00 等').setRequired(true))
-        .addStringOption(o => o.setName('底池金額').setDescription('發起人自掏腰包加碼底池 (選填，例如：500w、1000w)').setRequired(false))
+        .addStringOption(o => o.setName('底池金額').setDescription('加碼底池 (選填，例如：500w、1000w)').setRequired(false))
     ),
 
+  new SlashCommandBuilder().setName('查看賭局').setDescription('查看目前進行中的賭局面板'),
   new SlashCommandBuilder().setName('幸運頻道').setDescription('抽取今日幸運頻道')
     .addIntegerOption(o => o.setName('最大頻道').setDescription('最大頻道數').setRequired(true).setMinValue(1)),
   new SlashCommandBuilder().setName('報到').setDescription('【管理員專用】發送報到面板').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -410,16 +438,18 @@ client.on(Events.GuildMemberAdd, async (member) => {
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // ----------------------------------------
-    // [A] 斜線指令
+    // [A] 斜線指令處理
     // ----------------------------------------
     if (interaction.isChatInputCommand()) {
       const { commandName } = interaction;
 
+      // 1. 發起賭局
       if (commandName === '發起賭局') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
 
-        if (await hasActiveBet()) {
-          return interaction.reply({ content: '⚠️ **伺服器目前已有正在進行中的賭局！**\n為了維持秩序與彩池集中，請等待當前賭局結算後再開新局！', ephemeral: true });
+        const activeBet = await getActiveBetDoc();
+        if (activeBet) {
+          return interaction.reply({ content: '⚠️ **伺服器目前已有進行中的賭局！**\n請輸入 `/查看賭局` 查看或等待結算後再發起。', ephemeral: true });
         }
 
         const subCommand = interaction.options.getSubcommand();
@@ -447,8 +477,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             creatorName: interaction.user.username,
             title: `【${bookName}】能不能點過？`,
             options, deadline, seedMoney,
-            pityDonations: {}, // +0 同情抖內存儲
-            isScroll: false, isSettled: false,
+            pityDonations: {},
+            isScroll: false, isSettled: false, isPaused: false,
             createdAt: admin.firestore.FieldValue.serverTimestamp()
           };
 
@@ -487,7 +517,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             title: `【${equipName}】能過幾卷？(上限 +${maxScroll})`,
             options, deadline, seedMoney,
             pityDonations: {},
-            isScroll: true, isSettled: false,
+            isScroll: true, isSettled: false, isPaused: false,
             createdAt: admin.firestore.FieldValue.serverTimestamp()
           };
 
@@ -497,6 +527,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
             components: createMultiBetComponents(betDocRef.id, options, true)
           });
         }
+      }
+
+      // 2. 查看賭局
+      if (commandName === '查看賭局') {
+        if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
+        await interaction.deferReply();
+
+        const activeBetDoc = await getActiveBetDoc();
+        if (!activeBetDoc) return interaction.editReply('🎲 目前伺服器沒有進行中的賭局，輸入 `/發起賭局` 來開一盤吧！');
+
+        const betData = activeBetDoc.data();
+        return await interaction.editReply({
+          embeds: [createMultiBetEmbed(betData)],
+          components: createMultiBetComponents(betData.id, betData.options, betData.isScroll)
+        });
       }
 
       if (commandName === '幸運頻道') {
@@ -548,7 +593,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [B] 賭局按鈕 (即時動態刷新)
+    // [B] 按鈕處理 (下注、同情抖內、管理員操作)
     // ----------------------------------------
     if (interaction.isButton()) {
       const customId = interaction.customId;
@@ -556,11 +601,40 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (customId === 'btn_quick_edit') {
         const prevData = await fetchUserDocSafe(interaction.user.id);
         const defaultJob = prevData.mainJob || Object.keys(ROLES.JOBS)[0];
-        userSelectedJob.set(interaction.user.id, defaultJob);
+        userChoiceMap.set(interaction.user.id, defaultJob);
         return await interaction.showModal(createRegisterModal(defaultJob, prevData));
       }
 
-      // 1. 結算按鈕
+      // 管理員暫停/恢復
+      if (customId.startsWith('bet_admin_pause_')) {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+          return interaction.reply({ content: '❌ 僅伺服器管理員有權限暫停/恢復賭局！', ephemeral: true });
+        }
+        const betId = customId.replace('bet_admin_pause_', '');
+        const betDoc = await db.collection('active_bets').doc(betId).get();
+        if (!betDoc.exists) return interaction.reply({ content: '❌ 賭局已失效', ephemeral: true });
+
+        const betData = betDoc.data();
+        const nextState = !betData.isPaused;
+        await db.collection('active_bets').doc(betId).update({ isPaused: nextState });
+
+        const updatedData = { ...betData, isPaused: nextState };
+        await interaction.message.edit({ embeds: [createMultiBetEmbed(updatedData)], components: createMultiBetComponents(betId, updatedData.options, updatedData.isScroll) });
+        return await interaction.reply({ content: `✅ 管理員已成功將賭局【${nextState ? '暫停下注' : '恢復下注'}】！`, ephemeral: true });
+      }
+
+      // 管理員廢除/刪除賭局
+      if (customId.startsWith('bet_admin_delete_')) {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+          return interaction.reply({ content: '❌ 僅伺服器管理員有權限廢除刪除賭局！', ephemeral: true });
+        }
+        const betId = customId.replace('bet_admin_delete_', '');
+        await db.collection('active_bets').doc(betId).delete();
+        await interaction.message.edit({ content: '🗑️ **【賭局已廢除】該局已被管理員手動取消與刪除。**', embeds: [], components: [] });
+        return await interaction.reply({ content: '✅ 已成功刪除廢除該賭局！', ephemeral: true });
+      }
+
+      // 結算按鈕
       if (customId.startsWith('bet_settle_btn_')) {
         const betId = customId.replace('bet_settle_btn_', '');
         const betDoc = await db.collection('active_bets').doc(betId).get();
@@ -587,7 +661,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // 2. 快捷下注 +100w (二選一)
+      // 同情抖內按鈕 (技能書 + 衝卷皆適用)
+      if (customId.startsWith('bet_pity_donate_')) {
+        const betId = customId.replace('bet_pity_donate_', '');
+        const betDoc = await db.collection('active_bets').doc(betId).get();
+        if (!betDoc.exists) return interaction.reply({ content: '❌ 賭局已失效', ephemeral: true });
+        const betData = betDoc.data();
+
+        if (betData.isPaused || Date.now() >= betData.deadline) return interaction.reply({ content: '🛑 該賭局目前不接受下注/抖內！', ephemeral: true });
+
+        const randomPityQuote = getRandomPity(betData.isScroll ? 'scroll' : 'book');
+        const modal = new ModalBuilder().setCustomId(`modal_pity_donate_${betId}`).setTitle(`🩹 暴死深切救濟慰問 (私密)`);
+        modal.addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('input_pity_amount')
+            .setLabel(`${randomPityQuote.substring(0, 44)}`)
+            .setPlaceholder('填寫救濟金額 (例如：100w、500w)')
+            .setStyle(TextInputStyle.Short).setRequired(true)
+        ));
+        return await interaction.showModal(modal);
+      }
+
+      // 快捷下注 +100w (二選一)
       if (customId.startsWith('bet_quick_')) {
         const parts = customId.split('_');
         const betId = parts[2];
@@ -597,6 +692,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!betDoc.exists) return interaction.reply({ content: '❌ 賭局已失效', ephemeral: true });
         const betData = betDoc.data();
 
+        if (betData.isPaused) return interaction.reply({ content: '⏸️ 賭局已被管理員暫停下注！', ephemeral: true });
         if (Date.now() >= betData.deadline) return interaction.reply({ content: '🛑 該賭局已截止下注！', ephemeral: true });
 
         const addAmount = 1000000;
@@ -617,16 +713,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // 3. 衝卷/多選項快捷 +100w
+      // 衝卷多選項快捷 +100w
       if (customId.startsWith('bet_act_100w_')) {
         const betId = customId.replace('bet_act_100w_', '');
-        const selectedOptIdx = userSelectedJob.get(`bet_choice_${interaction.user.id}_${betId}`);
+        const selectedOptIdx = userChoiceMap.get(`bet_choice_${interaction.user.id}_${betId}`);
         if (selectedOptIdx === undefined) return interaction.reply({ content: '⚠️ 請先在上方下拉選單點選你要下注的【選項】！', ephemeral: true });
 
         const betDoc = await db.collection('active_bets').doc(betId).get();
         if (!betDoc.exists) return interaction.reply({ content: '❌ 賭局已失效', ephemeral: true });
         const betData = betDoc.data();
 
+        if (betData.isPaused) return interaction.reply({ content: '⏸️ 賭局已被管理員暫停下注！', ephemeral: true });
         if (Date.now() >= betData.deadline) return interaction.reply({ content: '🛑 該賭局已截止下注！', ephemeral: true });
 
         const addAmount = 1000000;
@@ -647,24 +744,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // 4. 自訂金額彈窗 (已選取下拉選單直接下注)
+      // 自訂金額彈窗
       if (customId.startsWith('bet_custom_btn_')) {
         const betId = customId.replace('bet_custom_btn_', '');
         const betDoc = await db.collection('active_bets').doc(betId).get();
         if (!betDoc.exists) return interaction.reply({ content: '❌ 賭局已失效', ephemeral: true });
         const betData = betDoc.data();
 
-        if (Date.now() >= betData.deadline) return interaction.reply({ content: '🛑 該賭局已截止下注！', ephemeral: true });
+        if (betData.isPaused || Date.now() >= betData.deadline) return interaction.reply({ content: '🛑 該賭局目前不接受下注！', ephemeral: true });
 
-        const isMulti = betData.options.length > 3;
-        let selectedOptIdx = userSelectedJob.get(`bet_choice_${interaction.user.id}_${betId}`);
+        const isMulti = betData.options.length > 3 || betData.isScroll;
+        let selectedOptIdx = userChoiceMap.get(`bet_choice_${interaction.user.id}_${betId}`);
 
         if (isMulti && selectedOptIdx === undefined) {
           return interaction.reply({ content: '⚠️ 請先在上方下拉選單點選你要下注的【選項 / 卷數】！', ephemeral: true });
         }
 
         const modal = new ModalBuilder().setCustomId(`modal_bet_custom_${betId}`).setTitle(`自訂下注金額`);
-        
         if (!isMulti) {
           let descList = betData.options.map((opt, i) => `${i + 1}:${opt.name}`).join(' | ');
           modal.addComponents(new ActionRowBuilder().addComponents(
@@ -672,50 +768,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ));
         }
 
-        const amountInput = new TextInputBuilder()
-          .setCustomId('input_bet_amount')
-          .setLabel(`下注金額 (支援 500w, 1e 或純數字)`)
-          .setPlaceholder(`例如：500w 或 5000000`)
-          .setStyle(TextInputStyle.Short).setRequired(true);
-
-        modal.addComponents(new ActionRowBuilder().addComponents(amountInput));
-        return await interaction.showModal(modal);
-      }
-
-      // 5. 🩹 +0 暴死同情抖內按鈕
-      if (customId.startsWith('bet_pity_donate_')) {
-        const betId = customId.replace('bet_pity_donate_', '');
-        const betDoc = await db.collection('active_bets').doc(betId).get();
-        if (!betDoc.exists) return interaction.reply({ content: '❌ 賭局已失效', ephemeral: true });
-        const betData = betDoc.data();
-
-        if (Date.now() >= betData.deadline) return interaction.reply({ content: '🛑 該賭局已截止下注/抖內！', ephemeral: true });
-
-        const modal = new ModalBuilder().setCustomId(`modal_pity_donate_${betId}`).setTitle(`🩹 +0 暴死棺材本救濟 (私密)`);
-        const amountInput = new TextInputBuilder()
-          .setCustomId('input_pity_amount')
-          .setLabel(`救濟金額 (若全爆暴死，這筆錢直接私給苦主)`)
-          .setPlaceholder(`例如：100w、500w (留空或填 0 則不抖內)`)
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true);
-
-        modal.addComponents(new ActionRowBuilder().addComponents(amountInput));
+        modal.addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('input_bet_amount').setLabel(`下注金額 (支援 500w, 1e 或純數字)`).setPlaceholder(`例如：500w 或 5000000`).setStyle(TextInputStyle.Short).setRequired(true)
+        ));
         return await interaction.showModal(modal);
       }
     }
 
     // ----------------------------------------
-    // [C] 下拉選單處理 (精簡化 ANSI 名冊樣式)
+    // [C] 下拉選單處理
     // ----------------------------------------
     if (interaction.isStringSelectMenu()) {
       if (interaction.customId.startsWith('bet_select_opt_')) {
         const betId = interaction.customId.replace('bet_select_opt_', '');
         const optIdx = parseInt(interaction.values[0]);
-        userSelectedJob.set(`bet_choice_${interaction.user.id}_${betId}`, optIdx);
-        return await interaction.reply({ content: `👉 已選中第 ${optIdx + 1} 個選項，現在可以點擊下方按鈕進行下注！`, ephemeral: true });
+        userChoiceMap.set(`bet_choice_${interaction.user.id}_${betId}`, optIdx);
+        return await interaction.reply({ content: `👉 已選中第 ${optIdx + 1} 個選項，現在可點擊下方按鈕下注！`, ephemeral: true });
       }
 
-      // 賭局結算執行 (ANSI 格式化精簡)
+      // 賭局結算執行
       if (interaction.customId.startsWith('settle_finalize_')) {
         await interaction.deferReply();
         const betId = interaction.customId.replace('settle_finalize_', '');
@@ -736,12 +807,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const bonusPool = totalPool - winPool;
 
         const balances = {};
-
         if (betData.seedMoney > 0) {
-          balances[betData.creatorId] = {
-            ign: betData.creatorName || '發起人底池',
-            net: -(betData.seedMoney)
-          };
+          balances[betData.creatorId] = { ign: betData.creatorName || '發起人底池', net: -(betData.seedMoney) };
         }
 
         options.forEach(opt => {
@@ -755,21 +822,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
         let resultsText = '```ansi\n';
         resultsText += `\u001b[1;33m🏆 最終結算：【${winOption.name}】獲勝！\u001b[0m\n\n`;
 
-        // 贏家名冊 (樣式精簡)
         if (winBets.length > 0) {
           resultsText += `\u001b[1;32m=== 贏家名冊 (哪有賭狗天天輸） ===\u001b[0m\n`;
           for (const [uid, b] of winBets) {
             const share = winPool > 0 ? (b.amount / winPool) * bonusPool : 0;
             const totalReturn = b.amount + Math.floor(share);
             balances[uid].net += totalReturn;
-
             resultsText += `\u001b[0;32m[${b.ign}_下注:${formatMeso(b.amount)}_+${formatMeso(Math.floor(share))}楓幣 (領回:${formatMeso(totalReturn)})]\u001b[0m\n`;
           }
         } else {
-          resultsText += `\u001b[0;32m無人押中此選項，底池與彩池全數保留/退回。\u001b[0m\n`;
+          resultsText += `\u001b[0;32m無人押中此選項，底池與彩池保留。\u001b[0m\n`;
         }
 
-        // 輸家名冊 (樣式精簡)
         resultsText += `\n\u001b[1;31m=== 輸家名冊 (賭狗賭狗賭到最後一無所有） ===\u001b[0m\n`;
         let hasLosers = false;
         options.forEach((opt, idx) => {
@@ -784,16 +848,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         resultsText += '```';
 
         const transfers = calculateMinTransfers(balances);
-        let transferGuide = `🧾 **【最少交易次數轉帳指引（共 ${transfers.length} 筆）】**\n*(依照以下指引在遊戲內交易，可大幅降低跑圖次數與官方手續費！)*\n\n`;
+        let transferGuide = `🧾 **【最少交易次數轉帳指引（共 ${transfers.length} 筆）】**\n\n`;
 
         if (transfers.length === 0) {
           transferGuide += `• 無需進行任何轉帳交易。`;
         } else {
           transfers.forEach((t, i) => {
             transferGuide += `${i + 1}. ➡️ **${t.from}** 交易給 **${t.to}**：\`${formatMeso(t.amount)} 楓幣\``;
-            if (t.amount >= 10000000) {
-              transferGuide += ` *(💡 單筆達 1000w 以上，可協議拆單降手續費率)*`;
-            }
+            if (t.amount >= 10000000) transferGuide += ` *(💡 單筆達 1000w 以上，可協議拆單降手續費率)*`;
             transferGuide += `\n`;
           });
         }
@@ -803,15 +865,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const settleEmbed = new EmbedBuilder()
           .setColor(0xF1C40F)
           .setTitle(`🎉【競猜結算公告】${betData.title}`)
-          .setDescription(`恭喜 **【${winOption.name}】** 成功開出！\n總獎金池 \`${formatMeso(totalPool)} 楓幣\` 已依照比例全數派發完畢！\n\n${resultsText}\n${transferGuide}`);
+          .setDescription(`恭喜 **【${winOption.name}】** 成功開出！\n總獎金池 \`${formatMeso(totalPool)} 楓幣\` 已派發完畢！\n\n${resultsText}\n${transferGuide}`);
 
         await interaction.editReply({ embeds: [settleEmbed] });
 
-        // 🌟 判定是否開出 +0 (全爆)，若是則私密發送同情抖內清單給發起人
-        const isPlusZero = winOption.name.includes('+0') || winOption.name.includes('全爆');
-        if (isPlusZero) {
+        // 判定暴死（+0 或 技能書爆掉）私密發送抖內救濟
+        const isBust = winOption.name.includes('+0') || winOption.name.includes('全爆') || winOption.name.includes('爆掉');
+        if (isBust) {
           const donations = Object.entries(betData.pityDonations || {});
-          let pityText = `😭 **【+0 暴死深切慰問清單】**\n大家看到你全爆都於心不忍... 以下是好心人給你的救濟金，請自行找他們領取買眼淚：\n\n`;
+          let pityText = `😭 **【暴死深切救濟清單】**\n${getRandomPity(betData.isScroll ? 'scroll' : 'book')}\n以下是好心人給你的同情救濟金，請自行找他們領取買藥：\n\n`;
           let totalPity = 0;
           if (donations.length > 0) {
             donations.forEach(([uid, d], idx) => {
@@ -827,7 +889,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             await interaction.followUp({ content: pityText, ephemeral: true });
           } catch (e) {}
         }
-
         return;
       }
 
@@ -848,7 +909,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ));
           return await interaction.showModal(modal);
         }
-        userSelectedJob.set(interaction.user.id, val);
+        userChoiceMap.set(interaction.user.id, val);
         return await interaction.showModal(createRegisterModal(val, prevData));
       }
     }
@@ -857,20 +918,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // [D] Modal 表單提交
     // ----------------------------------------
     if (interaction.isModalSubmit()) {
-      // 1. 同情抖內提交
+      // 同情抖內提交
       if (interaction.customId.startsWith('modal_pity_donate_')) {
         await interaction.deferReply({ ephemeral: true });
         const betId = interaction.customId.replace('modal_pity_donate_', '');
-        const rawAmount = interaction.fields.getTextInputValue('input_pity_amount').trim();
-        const donateAmount = parseMoneyInput(rawAmount);
+        const donateAmount = parseMoneyInput(interaction.fields.getTextInputValue('input_pity_amount').trim());
 
-        if (donateAmount <= 0) return interaction.editReply('❌ 金額為 0 或無效，未登記抖內。');
+        if (donateAmount <= 0) return interaction.editReply('❌ 金額無效，未登記抖內。');
 
         const betDoc = await db.collection('active_bets').doc(betId).get();
         if (!betDoc.exists) return interaction.editReply('❌ 賭局已失效');
         const betData = betDoc.data();
 
-        if (Date.now() >= betData.deadline) return interaction.editReply('🛑 該賭局已截止！');
+        if (betData.isPaused || Date.now() >= betData.deadline) return interaction.editReply('🛑 該賭局目前不接受下注/抖內！');
 
         const userDoc = await fetchUserDocSafe(interaction.user.id);
         const playerIgn = userDoc.mainIgn || interaction.user.displayName || interaction.user.username;
@@ -879,10 +939,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         pityDonations[interaction.user.id] = { ign: playerIgn, amount: donateAmount };
 
         await db.collection('active_bets').doc(betId).update({ pityDonations });
-        return await interaction.editReply(`🩹 已登記同情抖內 \`${formatMeso(donateAmount)} 楓幣\`！\n*(若最終開出 +0 暴死，系統會私密通知苦主找你領取救濟金，其他人看不到此筆金額)*`);
+        return await interaction.editReply(`🩹 已成功登記同情救濟 \`${formatMeso(donateAmount)} 楓幣\`！\n*(若最終暴死，系統會私密通知苦主領取，其餘人看不到此金額)*`);
       }
 
-      // 2. 自訂金額下注
+      // 自訂下注提交
       if (interaction.customId.startsWith('modal_bet_custom_')) {
         await interaction.deferReply({ ephemeral: true });
         const betId = interaction.customId.replace('modal_bet_custom_', '');
@@ -892,20 +952,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!betDoc.exists) return interaction.editReply('❌ 賭局已失效');
         const betData = betDoc.data();
 
-        if (Date.now() >= betData.deadline) return interaction.editReply('🛑 該賭局已截止下注！');
+        if (betData.isPaused || Date.now() >= betData.deadline) return interaction.editReply('🛑 該賭局目前不接受下注！');
 
         let optIdx;
-        if (betData.options.length > 3) {
-          optIdx = userSelectedJob.get(`bet_choice_${interaction.user.id}_${betId}`);
+        if (betData.options.length > 3 || betData.isScroll) {
+          optIdx = userChoiceMap.get(`bet_choice_${interaction.user.id}_${betId}`);
         } else {
-          const choiceRaw = interaction.fields.getTextInputValue('input_bet_choice')?.trim();
-          optIdx = parseInt(choiceRaw) - 1;
+          optIdx = parseInt(interaction.fields.getTextInputValue('input_bet_choice')?.trim()) - 1;
         }
 
         const betAmount = parseMoneyInput(rawAmount);
-
-        if (betAmount <= 0) return interaction.editReply('❌ 下注金額格式無效，請填寫大於 0 的數字！');
-        if (isNaN(optIdx) || optIdx < 0 || optIdx >= betData.options.length) return interaction.editReply(`❌ 選項無效，請重新在下拉選單選擇！`);
+        if (betAmount <= 0) return interaction.editReply('❌ 下注金額格式無效！');
+        if (isNaN(optIdx) || optIdx < 0 || optIdx >= betData.options.length) return interaction.editReply(`❌ 選項無效，請重新選擇！`);
 
         const userDoc = await fetchUserDocSafe(interaction.user.id);
         const playerIgn = userDoc.mainIgn || interaction.user.displayName || interaction.user.username;
@@ -919,12 +977,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`✅ 成功為 **${options[optIdx].name}** 下注 \`${formatMeso(betAmount)} 楓幣\`！(個人累計: ${formatMeso(currentBet + betAmount)})`);
       }
 
+      // 名冊更新
       if (interaction.customId === 'modal_register_page1') {
         await interaction.deferReply();
         const mainIgn = interaction.fields.getTextInputValue('input_main_ign').trim();
         const mainLevel = interaction.fields.getTextInputValue('input_main_level').replace(/[^0-9]/g, '') || '1';
         const playtime = interaction.fields.getTextInputValue('input_playtime').trim();
-        const mainJob = userSelectedJob.get(interaction.user.id) || '未知職業';
+        const mainJob = userChoiceMap.get(interaction.user.id) || '未知職業';
         const newNick = `[${mainLevel}_${mainJob}] ${mainIgn}`.substring(0, 32);
 
         const subLines1_2 = interaction.fields.getTextInputValue('input_subs_1_2').split('\n');
@@ -968,7 +1027,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const embed = new EmbedBuilder()
           .setColor(parseInt(mainLevel) >= 200 ? 0xF1C40F : 0x57F287)
-          .setTitle(parseInt(mainLevel) >= 200 ? '👑 傳奇登頂！Lv 200 典獄長資料已更新！' : '🎉 冒險家名冊已成功更新！')
+          .setTitle(parseInt(mainLevel) >= 200 ? '👑 傳奇登頂！Lv 200 典獄長名冊已更新！' : '🎉 冒險家名冊已成功更新！')
           .addFields(
             { name: '👑 本尊角色', value: `\`${mainIgn}\` (${mainJob} / Lv.${mainLevel})`, inline: true },
             { name: '⏱️ 遊玩時間', value: playtime, inline: true },
@@ -978,9 +1037,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           );
 
         await interaction.editReply({ embeds: [embed] });
-        userSelectedJob.delete(interaction.user.id);
+        userChoiceMap.delete(interaction.user.id);
       }
 
+      // 退休
       if (interaction.customId === 'modal_retire') {
         await interaction.deferReply();
         const ign = interaction.fields.getTextInputValue('input_retire_ign')?.trim() || interaction.user.displayName || interaction.user.username;
@@ -989,7 +1049,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (db) {
           await db.collection('member_profiles').doc(interaction.user.id).set({
             userId: interaction.user.id, username: interaction.user.username,
-            mainIgn, isRetired: true, timestamp: admin.firestore.FieldValue.serverTimestamp()
+            mainIgn: ign, isRetired: true, timestamp: admin.firestore.FieldValue.serverTimestamp()
           }, { merge: true }).catch(() => {});
         }
 

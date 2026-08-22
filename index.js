@@ -29,9 +29,25 @@ const ROLES = {
   }
 };
 
+// 職業專屬核心 Buff 定義
+const JOB_BUFFS = {
+  '黑騎士': ['神聖之火', '力量消除'],
+  '聖騎士': ['魔法消除'],
+  '英雄': ['激勵'],
+  '箭神': ['會心之眼'],
+  '神射手': ['會心之眼'],
+  '主教': ['神聖祈禱', '天使祝福'],
+  '冰雷': ['精神強化'],
+  '火毒': ['精神強化'],
+  '鏢賊': ['極速暗殺(速)', '幸運術'],
+  '拳霸': ['最終極速'],
+  '刀賊': [],
+  '槍神': []
+};
+
 const userChoiceMap = new Map();
 
-// 乾爹乾媽救濟文案庫 (隨機抽取，不重複風格)
+// 乾爹乾媽文案庫
 const DONOR_ACTIONS = [
   "救濟了發起人一碗暖心熱湯",
   "贊助了發起人一整包強力吸水面紙",
@@ -40,31 +56,16 @@ const DONOR_ACTIONS = [
   "為發起人送上了一份心靈創傷慰問金",
   "贊助了發起人鐵匠維修槌磨損補貼",
   "施捨了發起人買包止痛藥冷靜一下",
-  "贊助了發起人技能書骨灰罈安葬費",
-  "請發起人吃了一頓粗飽滷肉飯壓壓驚",
-  "贊助了發起人一件保暖衛生衣防止著涼"
+  "贊助了發起人技能書骨灰罈安葬費"
 ];
 
 function getRandomDonorAction() {
   return DONOR_ACTIONS[Math.floor(Math.random() * DONOR_ACTIONS.length)];
 }
 
-// 彈窗引導文案庫
 const PITY_TEXTS = {
-  scroll: [
-    "贊助苦主買包面紙擦眼淚...",
-    "給衝浪板買個好一點的骨灰罈...",
-    "全爆補助金：給老哥買碗熱湯喝...",
-    "給鐵匠維修槌子的磨損費...",
-    "純情施捨：至少回村買水不用跟人借錢..."
-  ],
-  book: [
-    "贊助苦主吸收技能書灰燼的心理治療費...",
-    "三飛閃/暴風神射火化費救濟金...",
-    "恭喜獲得『純粹的白光碎片』，贊助買糖吃...",
-    "技能書爆破受害者保護協會慰問金...",
-    "給可憐人買本初級數學教科書冷靜一下..."
-  ]
+  scroll: ["贊助苦主買包面紙擦眼淚...", "全爆補助金：給老哥買碗熱湯喝...", "給鐵匠維修槌子的磨損費..."],
+  book: ["贊助苦主吸收技能書灰燼的心理治療費...", "技能書爆破受害者保護協會慰問金...", "給可憐人買本初級教科書冷靜一下..."]
 };
 
 function getRandomPity(type) {
@@ -155,7 +156,48 @@ function calculateMinTransfers(balances) {
 }
 
 // ==========================================
-// 3. 賭局 UI 面板建構
+// 3. 團練揪團 UI 與資料建構
+// ==========================================
+
+function createPartyEmbed(partyData) {
+  const members = partyData.members || [];
+  const isFull = members.length >= partyData.maxCount;
+  const isClosed = partyData.isClosed;
+
+  let memberListText = members.length === 0 ? '• 目前尚無成員加入' : '';
+  members.forEach((m, idx) => {
+    const buffSummary = Object.entries(m.buffs || {})
+      .map(([bName, bLv]) => `${bName}:${bLv}`)
+      .join(' | ');
+    memberListText += `${idx + 1}. **${m.ign}** (${m.job} Lv.${m.level}) - <@${m.userId}>\n   └ 💡 Buff：\`${buffSummary || '無'}\`\n`;
+  });
+
+  return new EmbedBuilder()
+    .setColor(isClosed ? 0x95A5A6 : (isFull ? 0xF1C40F : 0x3498DB))
+    .setTitle(`⚔️【冒險者團練揪團】${partyData.target}`)
+    .setDescription(
+      `👑 **主揪隊長**：<@${partyData.creatorId}>\n` +
+      `⏰ **開打時間**：\`${partyData.startTime}\`\n` +
+      `⏱️ **預計時長 / 備註**：\`${partyData.duration || '無備註'}\`\n` +
+      `👥 **隊伍人數**：\`${members.length} / ${partyData.maxCount} 人\` ${isFull ? '🔴 **(已滿員)**' : '🟢 **(招募中)**'}\n` +
+      `狀態：${isClosed ? '🔒 **已結束招募**' : '✨ **歡迎各位冒險家點擊下方按鈕報名加入！**'}\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `📋 **【目前隊伍名單】**\n${memberListText}`
+    )
+    .setFooter({ text: '點擊下方按鈕即可快速報名、選擇角色並登記 Buff' });
+}
+
+function createPartyComponents(partyId, isClosed = false) {
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`party_join_${partyId}`).setLabel('✋ 報名加入').setStyle(ButtonStyle.Success).setDisabled(isClosed),
+    new ButtonBuilder().setCustomId(`party_leave_${partyId}`).setLabel('❌ 取消報名').setStyle(ButtonStyle.Secondary).setDisabled(isClosed),
+    new ButtonBuilder().setCustomId(`party_close_${partyId}`).setLabel('🚪 關閉/完成揪團').setStyle(ButtonStyle.Danger).setDisabled(isClosed)
+  );
+  return [row];
+}
+
+// ==========================================
+// 4. 賭局 UI 面板建構
 // ==========================================
 
 function createMultiBetEmbed(betData) {
@@ -241,7 +283,7 @@ async function getActiveBetDoc() {
 }
 
 // ==========================================
-// 4. 名冊工具模組
+// 5. 名冊工具模組 (包含全部名冊分組查詢)
 // ==========================================
 function buildMainSelectMenu() {
   const options = Object.keys(ROLES.JOBS).map(job =>
@@ -254,15 +296,21 @@ function buildMainSelectMenu() {
 }
 
 function buildJobQueryMenu() {
-  const options = Object.keys(ROLES.JOBS).map(job =>
-    new StringSelectMenuOptionBuilder().setLabel(job).setValue(job).setDescription(`查看【${job}】名冊`)
-  );
+  const options = [
+    new StringSelectMenuOptionBuilder().setLabel('📋 全部名冊 (依職業分組)').setValue('ALL_JOBS_LIST').setDescription('查看全伺服器成員職業名冊')
+  ];
+
+  Object.keys(ROLES.JOBS).forEach(job => {
+    options.push(new StringSelectMenuOptionBuilder().setLabel(job).setValue(job).setDescription(`查看【${job}】名冊`));
+  });
+
   options.push(
     new StringSelectMenuOptionBuilder().setLabel('👑 Lv 200 典獄長名冊').setValue('WARDEN_LIST').setDescription('查看達成 200 等傳奇成員'),
     new StringSelectMenuOptionBuilder().setLabel('💤 暫.退休名單').setValue('RETIRED_LIST').setDescription('查看退休成員名單')
   );
+
   return new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder().setCustomId('select_query_job').setPlaceholder('🔍 點此切換查看其他名冊').addOptions(options)
+    new StringSelectMenuBuilder().setCustomId('select_query_job').setPlaceholder('🔍 點此切換查看名冊').addOptions(options.slice(0, 25))
   );
 }
 
@@ -306,37 +354,74 @@ function createRegisterModal(selectedJob, prevData) {
   return modal;
 }
 
+// 產生名冊 Embed (包含「全部名冊依職業分組」)
 async function generateJobEmbed(targetJob) {
   if (!db) return new EmbedBuilder().setColor(0xED4245).setDescription('❌ 資料庫連線異常');
   const snapshot = await db.collection('member_profiles').get();
-  if (snapshot.empty) return new EmbedBuilder().setColor(0x3498DB).setTitle(`📋【${targetJob}】名冊`).setDescription('目前尚無紀錄。');
+  if (snapshot.empty) return new EmbedBuilder().setColor(0x3498DB).setTitle('📋 名冊總覽').setDescription('目前尚無任何紀錄。');
 
   const members = [];
   snapshot.forEach(doc => members.push(doc.data()));
 
+  // 1. 全部名冊（依職業分組）
+  if (targetJob === 'ALL_JOBS_LIST') {
+    const embed = new EmbedBuilder().setColor(0x3498DB).setTitle('📋【伺服器全部名冊總覽】(依職業分組)');
+    let fieldCount = 0;
+
+    for (const jobName of Object.keys(ROLES.JOBS)) {
+      const charList = [];
+      for (const m of members) {
+        if (m.isRetired) continue;
+        if (m.mainJob === jobName) {
+          charList.push({ text: `\`(${m.mainIgn}_Lv.${m.mainLevel})\` <@${m.userId}> **【本】**`, level: parseInt(m.mainLevel) || 0 });
+        }
+        if (m.subs && Array.isArray(m.subs)) {
+          m.subs.forEach(s => {
+            if (s?.job === jobName) {
+              charList.push({ text: `\`(${s.ign}_Lv.${s.level})\` <@${m.userId}> *(本尊: ${m.mainIgn})*`, level: parseInt(s.level) || 0 });
+            }
+          });
+        }
+      }
+
+      if (charList.length > 0 && fieldCount < 24) {
+        charList.sort((a, b) => b.level - a.level);
+        embed.addFields({
+          name: `⚔️ ${jobName} (${charList.length})`,
+          value: charList.map(c => `• ${c.text}`).join('\n').substring(0, 1024),
+          inline: false
+        });
+        fieldCount++;
+      }
+    }
+
+    const retired = members.filter(m => m.isRetired);
+    if (retired.length > 0 && fieldCount < 25) {
+      embed.addFields({
+        name: `💤 暫.退休 (${retired.length})`,
+        value: retired.map(m => `• <@${m.userId}> (\`${m.mainIgn || '退休'}\`)`).join('\n').substring(0, 1024),
+        inline: false
+      });
+    }
+
+    return embed;
+  }
+
+  // 2. 200 等典獄長
   if (targetJob === 'WARDEN_LIST') {
     const wardens = members.filter(m => !m.isRetired && parseInt(m.mainLevel) >= 200);
     const desc = wardens.length ? wardens.map((m, i) => `${i + 1}. 👑 \`(${m.mainIgn}_${m.mainJob}_${m.mainLevel}等)\` - <@${m.userId}>`).join('\n') : '目前尚未誕生 Lv 200 典獄長！';
     return new EmbedBuilder().setColor(0xF1C40F).setTitle('👑【尊榮的 Lv 200_典獄長】傳奇名冊').setDescription(desc);
   }
 
+  // 3. 暫.退休
   if (targetJob === 'RETIRED_LIST') {
     const retired = members.filter(m => m.isRetired);
     const desc = retired.length ? retired.map((m, i) => `${i + 1}. <@${m.userId}> (\`${m.mainIgn || '退休'}\`)`).join('\n') : '目前沒有暫.退休成員。';
     return new EmbedBuilder().setColor(0x95A5A6).setTitle('📋【💤 暫.退休】名單').setDescription(desc);
   }
 
-  const subIgnOwnersMap = new Map();
-  members.forEach(m => {
-    if (m.isRetired || !m.subs) return;
-    m.subs.forEach(s => {
-      if (!s || !s.ign) return;
-      const ignKey = s.ign.toLowerCase();
-      if (!subIgnOwnersMap.has(ignKey)) subIgnOwnersMap.set(ignKey, []);
-      subIgnOwnersMap.get(ignKey).push(m.mainIgn);
-    });
-  });
-
+  // 4. 單一職業查詢
   const list = [];
   for (const m of members) {
     if (m.isRetired) continue;
@@ -344,8 +429,7 @@ async function generateJobEmbed(targetJob) {
     if (m.subs && Array.isArray(m.subs)) {
       m.subs.forEach(s => {
         if (s?.job === targetJob) {
-          const owners = subIgnOwnersMap.get(s.ign.toLowerCase()) || [m.mainIgn];
-          list.push({ text: `\`(${s.ign}_${s.job}_${s.level}等)\` - <@${m.userId}> [本尊: \`${owners.join(' & ')}\`]`, level: parseInt(s.level) || 0 });
+          list.push({ text: `\`(${s.ign}_${s.job}_${s.level}等)\` - <@${m.userId}> [本尊: \`${m.mainIgn}\`]`, level: parseInt(s.level) || 0 });
         }
       });
     }
@@ -357,7 +441,7 @@ async function generateJobEmbed(targetJob) {
 }
 
 // ==========================================
-// 5. Express 伺服器 & Firebase
+// 6. Express 伺服器 & Firebase
 // ==========================================
 const app = express();
 app.get('/', (req, res) => res.send('Auto-Bot Online!'));
@@ -373,9 +457,17 @@ try {
 } catch (e) { console.error('❌ Firebase Error:', e.message); }
 
 // ==========================================
-// 6. 斜線指令註冊
+// 7. 斜線指令註冊
 // ==========================================
 const commands = [
+  new SlashCommandBuilder()
+    .setName('團練')
+    .setDescription('發起團練揪團 (可登記職業與核心 Buff 等級)')
+    .addStringOption(o => o.setName('地點').setDescription('例如：蛋龍、忘卻6、神木村').setRequired(true))
+    .addStringOption(o => o.setName('開打時間').setDescription('例如：2026.08.22 13:00 或 今晚 8 點').setRequired(true))
+    .addStringOption(o => o.setName('備註時長').setDescription('例如：打氣場、打 Hot time 2 小時').setRequired(false))
+    .addIntegerOption(o => o.setName('需要人數').setDescription('預計招募人數 (預設 6 人)').setRequired(false).setMinValue(2).setMaxValue(30)),
+
   new SlashCommandBuilder()
     .setName('發起賭局')
     .setDescription('發起社群競猜賭局 (同時間全服限一局)')
@@ -399,9 +491,12 @@ const commands = [
   new SlashCommandBuilder().setName('幸運頻道').setDescription('抽取今日幸運頻道')
     .addIntegerOption(o => o.setName('最大頻道').setDescription('最大頻道數').setRequired(true).setMinValue(1)),
   new SlashCommandBuilder().setName('報到').setDescription('【管理員專用】發送報到面板').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-  new SlashCommandBuilder().setName('職業查詢').setDescription('依職業查看成員與分身名冊')
-    .addStringOption(o => o.setName('職業名稱').setDescription('選擇要查看的職業').setRequired(false)
-      .addChoices(Object.keys(ROLES.JOBS).map(j => ({ name: j, value: j })))),
+  new SlashCommandBuilder().setName('職業查詢').setDescription('依職業或全部名冊查看成員資訊')
+    .addStringOption(o => o.setName('職業名稱').setDescription('選擇要查看的職業 (留空可看全部)').setRequired(false)
+      .addChoices(
+        { name: '📋 全部名冊 (依職業分組)', value: 'ALL_JOBS_LIST' },
+        ...Object.keys(ROLES.JOBS).map(j => ({ name: j, value: j }))
+      )),
   new SlashCommandBuilder().setName('個人名片').setDescription('查看自己登記的名片資訊')
 ].map(c => c.toJSON());
 
@@ -451,17 +546,44 @@ client.on(Events.GuildMemberAdd, async (member) => {
 });
 
 // ==========================================
-// 7. 互動事件核心監聽
+// 8. 互動事件核心監聽
 // ==========================================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // ----------------------------------------
-    // [A] 斜線指令處理
+    // [A] 斜線指令
     // ----------------------------------------
     if (interaction.isChatInputCommand()) {
       const { commandName } = interaction;
 
-      // 1. 發起賭局
+      // 1. /團練
+      if (commandName === '團練') {
+        if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
+        await interaction.deferReply();
+
+        const target = interaction.options.getString('地點');
+        const startTime = interaction.options.getString('開打時間');
+        const duration = interaction.options.getString('備註時長') || '打氣場 / 配合隊伍';
+        const maxCount = interaction.options.getInteger('需要人數') || 6;
+
+        const partyRef = db.collection('party_trainings').doc();
+        const partyData = {
+          id: partyRef.id,
+          creatorId: interaction.user.id,
+          target, startTime, duration, maxCount,
+          members: [],
+          isClosed: false,
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        };
+
+        await partyRef.set(partyData);
+        return await interaction.editReply({
+          embeds: [createPartyEmbed(partyData)],
+          components: createPartyComponents(partyRef.id, false)
+        });
+      }
+
+      // 2. /發起賭局
       if (commandName === '發起賭局') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
 
@@ -547,7 +669,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
       }
 
-      // 2. 查看賭局
       if (commandName === '查看賭局') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
         await interaction.deferReply();
@@ -579,7 +700,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (commandName === '職業查詢') {
         await interaction.deferReply();
-        const targetJob = interaction.options.getString('職業名稱') || Object.keys(ROLES.JOBS)[0];
+        const targetJob = interaction.options.getString('職業名稱') || 'ALL_JOBS_LIST';
         const embed = await generateJobEmbed(targetJob);
         return await interaction.editReply({ embeds: [embed], components: [buildJobQueryMenu()] });
       }
@@ -611,10 +732,87 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [B] 按鈕處理
+    // [B] 按鈕處理 (團練、賭局、管理員)
     // ----------------------------------------
     if (interaction.isButton()) {
       const customId = interaction.customId;
+
+      // 1. 團練報名按鈕
+      if (customId.startsWith('party_join_')) {
+        const partyId = customId.replace('party_join_', '');
+        const partyDoc = await db.collection('party_trainings').doc(partyId).get();
+        if (!partyDoc.exists) return interaction.reply({ content: '❌ 該團練揪團已不存在。', ephemeral: true });
+
+        const partyData = partyDoc.data();
+        if (partyData.isClosed) return interaction.reply({ content: '🔒 該團練已關閉招募。', ephemeral: true });
+
+        const prevData = await fetchUserDocSafe(interaction.user.id);
+        const charOptions = [];
+
+        if (prevData.mainIgn) {
+          charOptions.push(new StringSelectMenuOptionBuilder()
+            .setLabel(`👑 本尊：${prevData.mainIgn} (${prevData.mainJob} Lv.${prevData.mainLevel})`)
+            .setValue(`CHAR_MAIN`));
+        }
+
+        if (prevData.subs && Array.isArray(prevData.subs)) {
+          prevData.subs.forEach((s, idx) => {
+            charOptions.push(new StringSelectMenuOptionBuilder()
+              .setLabel(`⚔️ 分身：${s.ign} (${s.job} Lv.${s.level})`)
+              .setValue(`CHAR_SUB_${idx}`));
+          });
+        }
+
+        charOptions.push(new StringSelectMenuOptionBuilder()
+          .setLabel('✏️ 自訂角色資訊與職業')
+          .setValue('CHAR_CUSTOM'));
+
+        return await interaction.reply({
+          content: '👉 **請選擇你要用哪一隻角色報名加入團練：**',
+          components: [new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder().setCustomId(`party_select_char_${partyId}`).setPlaceholder('選擇報名角色').addOptions(charOptions)
+          )],
+          ephemeral: true
+        });
+      }
+
+      // 2. 取消報名
+      if (customId.startsWith('party_leave_')) {
+        const partyId = customId.replace('party_leave_', '');
+        const partyDoc = await db.collection('party_trainings').doc(partyId).get();
+        if (!partyDoc.exists) return interaction.reply({ content: '❌ 該團練已不存在。', ephemeral: true });
+
+        const partyData = partyDoc.data();
+        const newMembers = (partyData.members || []).filter(m => m.userId !== interaction.user.id);
+
+        await db.collection('party_trainings').doc(partyId).update({ members: newMembers });
+        await interaction.message.edit({ embeds: [createPartyEmbed({ ...partyData, members: newMembers })] });
+
+        return await interaction.reply({ content: '✅ 已為您取消報名此團練！', ephemeral: true });
+      }
+
+      // 3. 關閉揪團 (限主揪或管理員)
+      if (customId.startsWith('party_close_')) {
+        const partyId = customId.replace('party_close_', '');
+        const partyDoc = await db.collection('party_trainings').doc(partyId).get();
+        if (!partyDoc.exists) return interaction.reply({ content: '❌ 該團練已不存在。', ephemeral: true });
+
+        const partyData = partyDoc.data();
+        const isCreator = interaction.user.id === partyData.creatorId;
+        const isAdmin = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
+
+        if (!isCreator && !isAdmin) {
+          return interaction.reply({ content: '❌ 只有主揪隊長或管理員可關閉揪團！', ephemeral: true });
+        }
+
+        await db.collection('party_trainings').doc(partyId).update({ isClosed: true });
+        await interaction.message.edit({
+          embeds: [createPartyEmbed({ ...partyData, isClosed: true })],
+          components: createPartyComponents(partyId, true)
+        });
+
+        return await interaction.reply({ content: '🔒 團練揪團已成功關閉！祝各位冒險家練等順利！', ephemeral: true });
+      }
 
       if (customId === 'btn_quick_edit') {
         const prevData = await fetchUserDocSafe(interaction.user.id);
@@ -623,7 +821,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(createRegisterModal(defaultJob, prevData));
       }
 
-      // 管理員暫停/恢復
+      // 管理員暫停/恢復賭局
       if (customId.startsWith('bet_admin_pause_')) {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
           return interaction.reply({ content: '❌ 僅伺服器管理員有權限暫停/恢復賭局！', ephemeral: true });
@@ -652,7 +850,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.reply({ content: '✅ 已成功刪除廢除該賭局！', ephemeral: true });
       }
 
-      // 結算按鈕
+      // 賭局結算按鈕
       if (customId.startsWith('bet_settle_btn_')) {
         const betId = customId.replace('bet_settle_btn_', '');
         const betDoc = await db.collection('active_bets').doc(betId).get();
@@ -797,6 +995,57 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // [C] 下拉選單處理
     // ----------------------------------------
     if (interaction.isStringSelectMenu()) {
+      // 團練角色選擇 -> 彈出該職業 Buff 等級填寫 Modal
+      if (interaction.customId.startsWith('party_select_char_')) {
+        const partyId = interaction.customId.replace('party_select_char_', '');
+        const selectedVal = interaction.values[0];
+        const prevData = await fetchUserDocSafe(interaction.user.id);
+
+        let charIgn = prevData.mainIgn || interaction.user.displayName;
+        let charJob = prevData.mainJob || '黑騎士';
+        let charLevel = prevData.mainLevel || '120';
+
+        if (selectedVal.startsWith('CHAR_SUB_')) {
+          const subIdx = parseInt(selectedVal.replace('CHAR_SUB_', ''));
+          const sub = prevData.subs?.[subIdx];
+          if (sub) { charIgn = sub.ign; charJob = sub.job; charLevel = sub.level; }
+        }
+
+        userChoiceMap.set(`party_reg_${interaction.user.id}_${partyId}`, { charIgn, charJob, charLevel });
+
+        const modal = new ModalBuilder().setCustomId(`modal_party_buffs_${partyId}`).setTitle(`團練報名 (${charJob})`);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('input_char_info').setLabel('角色ID / 職業 / 等級').setValue(`${charIgn}/${charJob}/${charLevel}`).setStyle(TextInputStyle.Short).setRequired(true)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('input_maple_buff').setLabel('全職業必填：【楓葉祝福】等級 (可填: 滿 或 1~30)').setPlaceholder('例如：滿、20、10、無').setValue('滿').setStyle(TextInputStyle.Short).setRequired(true)
+          )
+        );
+
+        // 依職業專屬技能自動增添輸入框
+        const buffs = JOB_BUFFS[charJob] || [];
+        if (buffs.length > 0) {
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(
+              new TextInputBuilder().setCustomId('input_job_buff_1').setLabel(`專屬 Buff：【${buffs[0]}】等級 (可填: 滿 或 數字)`).setPlaceholder('例如：滿、30、無').setValue('滿').setStyle(TextInputStyle.Short).setRequired(false)
+            )
+          );
+        }
+
+        if (buffs.length > 1) {
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(
+              new TextInputBuilder().setCustomId('input_job_buff_2').setLabel(`專屬 Buff：【${buffs[1]}】等級 (可填: 滿 或 數字)`).setPlaceholder('例如：滿、20、無').setValue('滿').setStyle(TextInputStyle.Short).setRequired(false)
+            )
+          );
+        }
+
+        return await interaction.showModal(modal);
+      }
+
+      // 賭局選項選定
       if (interaction.customId.startsWith('bet_select_opt_')) {
         const betId = interaction.customId.replace('bet_select_opt_', '');
         const optIdx = parseInt(interaction.values[0]);
@@ -804,7 +1053,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.reply({ content: `👉 已選中第 ${optIdx + 1} 個選項，現在可點擊下方按鈕下注！`, ephemeral: true });
       }
 
-      // 賭局結算執行 (包含乾爹乾媽名冊輸出)
+      // 賭局結算執行
       if (interaction.customId.startsWith('settle_finalize_')) {
         await interaction.deferReply();
         const betId = interaction.customId.replace('settle_finalize_', '');
@@ -864,7 +1113,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
         if (!hasLosers) resultsText += `\u001b[0;31m無輸家。\u001b[0m\n`;
 
-        // 🌟 判定暴死，追加公開「乾爹乾媽名冊」
         const isBust = winOption.name.includes('+0') || winOption.name.includes('全爆') || winOption.name.includes('爆掉');
         const donations = Object.entries(betData.pityDonations || {});
 
@@ -900,7 +1148,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         await interaction.editReply({ embeds: [settleEmbed] });
 
-        // 私密發送救濟金彙總給發起人苦主
         if (isBust) {
           let pityText = `😭 **【暴死深切救濟清單】**\n${getRandomPity(betData.isScroll ? 'scroll' : 'book')}\n以下是好心人給你的同情救濟金，請自行找他們領取買藥：\n\n`;
           let totalPity = 0;
@@ -914,19 +1161,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
             pityText += `可惜... 這次沒有人留下救濟金，請堅強活下去！`;
           }
 
-          try {
-            await interaction.followUp({ content: pityText, ephemeral: true });
-          } catch (e) {}
+          try { await interaction.followUp({ content: pityText, ephemeral: true }); } catch (e) {}
         }
         return;
       }
 
+      // 職業查詢名冊切換
       if (interaction.customId === 'select_query_job') {
         await interaction.deferUpdate();
         const embed = await generateJobEmbed(interaction.values[0]);
         return await interaction.editReply({ embeds: [embed], components: [buildJobQueryMenu()] });
       }
 
+      // 報到主職業選單
       if (interaction.customId === 'select_job_register') {
         const val = interaction.values[0];
         const prevData = await fetchUserDocSafe(interaction.user.id);
@@ -947,7 +1194,48 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // [D] Modal 表單提交
     // ----------------------------------------
     if (interaction.isModalSubmit()) {
-      // 同情抖內提交
+      // 1. 團練 Buff 登記送出
+      if (interaction.customId.startsWith('modal_party_buffs_')) {
+        await interaction.deferReply({ ephemeral: true });
+        const partyId = interaction.customId.replace('modal_party_buffs_', '');
+
+        const partyDoc = await db.collection('party_trainings').doc(partyId).get();
+        if (!partyDoc.exists) return interaction.editReply('❌ 該團練揪團已失效。');
+        const partyData = partyDoc.data();
+
+        const rawCharInfo = interaction.fields.getTextInputValue('input_char_info');
+        const parts = rawCharInfo.split(/[/\\|\s,，_-]+/).map(s => s.trim()).filter(Boolean);
+        const ign = parts[0] || interaction.user.displayName;
+        const job = parts[1] || '冒險家';
+        const level = parts[2] || '120';
+
+        const mapleBuff = interaction.fields.getTextInputValue('input_maple_buff')?.trim() || '滿';
+        const buffs = { '楓祝': mapleBuff };
+
+        const definedBuffs = JOB_BUFFS[job] || [];
+        if (definedBuffs.length > 0) {
+          try {
+            const b1 = interaction.fields.getTextInputValue('input_job_buff_1')?.trim();
+            if (b1) buffs[definedBuffs[0]] = b1;
+          } catch (e) {}
+        }
+        if (definedBuffs.length > 1) {
+          try {
+            const b2 = interaction.fields.getTextInputValue('input_job_buff_2')?.trim();
+            if (b2) buffs[definedBuffs[1]] = b2;
+          } catch (e) {}
+        }
+
+        const members = (partyData.members || []).filter(m => m.userId !== interaction.user.id);
+        members.push({ userId: interaction.user.id, ign, job, level, buffs });
+
+        await db.collection('party_trainings').doc(partyId).update({ members });
+        await interaction.message.edit({ embeds: [createPartyEmbed({ ...partyData, members })] });
+
+        return await interaction.editReply(`🎉 成功報名加入【${partyData.target}】團練！\n角色：\`${ign}\` (${job} Lv.${level}) | Buff：\`${Object.entries(buffs).map(([k, v]) => `${k}:${v}`).join(', ')}\``);
+      }
+
+      // 2. 同情抖內提交
       if (interaction.customId.startsWith('modal_pity_donate_')) {
         await interaction.deferReply({ ephemeral: true });
         const betId = interaction.customId.replace('modal_pity_donate_', '');
@@ -971,7 +1259,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`🩹 已成功登記同情救濟 \`${formatMeso(donateAmount)} 楓幣\`！\n*(若最終暴死，系統會公開乾爹乾媽名冊，並私密通知苦主領取)*`);
       }
 
-      // 自訂下注提交
+      // 3. 自訂下注提交
       if (interaction.customId.startsWith('modal_bet_custom_')) {
         await interaction.deferReply({ ephemeral: true });
         const betId = interaction.customId.replace('modal_bet_custom_', '');
@@ -1006,7 +1294,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`✅ 成功為 **${options[optIdx].name}** 下注 \`${formatMeso(betAmount)} 楓幣\`！(個人累計: ${formatMeso(currentBet + betAmount)})`);
       }
 
-      // 名冊更新
+      // 4. 名冊更新
       if (interaction.customId === 'modal_register_page1') {
         await interaction.deferReply();
         const mainIgn = interaction.fields.getTextInputValue('input_main_ign').trim();
@@ -1069,7 +1357,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         userChoiceMap.delete(interaction.user.id);
       }
 
-      // 退休
+      // 5. 退休
       if (interaction.customId === 'modal_retire') {
         await interaction.deferReply();
         const ign = interaction.fields.getTextInputValue('input_retire_ign')?.trim() || interaction.user.displayName || interaction.user.username;
@@ -1086,7 +1374,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const member = await interaction.guild.members.fetch(interaction.user.id);
           const allJobIds = Object.values(ROLES.JOBS);
           const oldJobs = member.roles.cache.filter(r => allJobIds.includes(r.id) || r.id === ROLES.UNVERIFIED || r.id === ROLES.WARDEN_200);
-          if (oldJobs.size) await member.roles.remove(oldJobs);
+          if (oldJobs.size) await member.roles.remove(oldRoles);
           await member.roles.add([ROLES.VERIFIED, ROLES.RETIRED]);
           await member.setNickname(newNick).catch(() => {});
         } catch (e) {}

@@ -48,7 +48,6 @@ const JOB_BUFFS = {
 
 const userChoiceMap = new Map();
 
-// 搞笑救濟文案庫
 const DONOR_ACTIONS = [
   "救濟了發起人一碗暖心熱湯", "贊助了一整包強力吸水面紙", "請喝了一杯全糖壓驚珍奶",
   "施捨了一張回村卷軸買水錢", "送上一份心靈創傷慰問金", "贊助鐵匠維修槌磨損費"
@@ -660,7 +659,7 @@ try {
 } catch (e) { console.error('❌ Firebase Error:', e.message); }
 
 // ==========================================
-// 9. 斜線指令樹大整併註冊
+// 9. 斜線指令樹註冊 (簡化主選單 + 統一 /查看)
 // ==========================================
 const commands = [
   new SlashCommandBuilder().setName('角色狀態').setDescription('查看與切換共用/借用角色的上線與在線狀態 (私密)'),
@@ -673,55 +672,42 @@ const commands = [
     .addStringOption(o => o.setName('預計多久離開').setDescription('例如：10分鐘後、21:30、半小時後').setRequired(true))
     .addStringOption(o => o.setName('備註說明').setDescription('例如：有死角Bug、需自備祈禱 (選填)').setRequired(false)),
 
+  // 1. /揪團 主指令 (發起)
   new SlashCommandBuilder()
     .setName('揪團')
-    .setDescription('社群組隊揪團系統 (團練 / 突襲 / 組隊任務)')
-    .addSubcommandGroup(group =>
-      group.setName('團練')
-        .setDescription('團練揪團子功能')
-        .addSubcommand(sub =>
-          sub.setName('發起')
-            .setDescription('發起一般地圖團練')
-            .addStringOption(o => o.setName('地點').setDescription('例如：蛋龍、忘卻6、神木村').setRequired(true))
-            .addStringOption(o => o.setName('開打時間').setDescription('例如：2026.08.22 13:00 或 今晚 8 點').setRequired(true))
-            .addStringOption(o => o.setName('綁定需求').setDescription('例如：需綁定主教、鏢賊綁眼、缺火 (選填)').setRequired(false))
-            .addStringOption(o => o.setName('自備機台').setDescription('主揪自備支援設備 (例如：設備上限2台，火+祈禱機)').setRequired(false))
-            .addStringOption(o => o.setName('備註時長').setDescription('例如：打氣場、打 Hot time 2 小時').setRequired(false))
-            .addIntegerOption(o => o.setName('需要人數').setDescription('預計招募人數 (預設 6 人)').setRequired(false).setMinValue(2).setMaxValue(30))
-        )
-        .addSubcommand(sub => sub.setName('查看').setDescription('查看進行中團練列表並可直接加入'))
+    .setDescription('社群組隊揪團發起 (團練 / 突襲 / 組隊任務)')
+    .addSubcommand(sub =>
+      sub.setName('團練')
+        .setDescription('發起一般地圖團練')
+        .addStringOption(o => o.setName('地點').setDescription('例如：蛋龍、忘卻6、神木村').setRequired(true))
+        .addStringOption(o => o.setName('開打時間').setDescription('例如：2026.08.22 13:00 或 今晚 8 點').setRequired(true))
+        .addStringOption(o => o.setName('綁定需求').setDescription('例如：需綁定主教、鏢賊綁眼、缺火 (選填)').setRequired(false))
+        .addStringOption(o => o.setName('自備機台').setDescription('主揪自備支援設備 (例如：設備上限2台，火+祈禱機)').setRequired(false))
+        .addStringOption(o => o.setName('備註時長').setDescription('例如：打氣場、打 Hot time 2 小時').setRequired(false))
+        .addIntegerOption(o => o.setName('需要人數').setDescription('預計招募人數 (預設 6 人)').setRequired(false).setMinValue(2).setMaxValue(30))
     )
-    .addSubcommandGroup(group =>
-      group.setName('突襲')
-        .setDescription('Boss 突襲遠征揪團子功能')
-        .addSubcommand(sub =>
-          sub.setName('發起')
-            .setDescription('發起 Boss 突襲遠征隊')
-            .addStringOption(o => o.setName('目標王').setDescription('例如：闇黑龍王、殘暴炎魔、皮卡啾').setRequired(true))
-            .addStringOption(o => o.setName('開打時間').setDescription('例如：今晚 21:00、週六 14:00').setRequired(true))
-            .addStringOption(o => o.setName('門檻要求').setDescription('例如：需洗血、主教自備復活用品 (選填)').setRequired(false))
-            .addIntegerOption(o => o.setName('需要人數').setDescription('預計招募人數 (預設 6 人)').setRequired(false).setMinValue(2).setMaxValue(30))
-        )
-        .addSubcommand(sub => sub.setName('查看').setDescription('查看進行中突襲遠征隊'))
+    .addSubcommand(sub =>
+      sub.setName('突襲')
+        .setDescription('發起 Boss 突襲遠征隊')
+        .addStringOption(o => o.setName('目標王').setDescription('例如：闇黑龍王、殘暴炎魔、皮卡啾').setRequired(true))
+        .addStringOption(o => o.setName('開打時間').setDescription('例如：今晚 21:00、週六 14:00').setRequired(true))
+        .addStringOption(o => o.setName('門檻要求').setDescription('例如：需洗血、主教自備復活用品 (選填)').setRequired(false))
+        .addIntegerOption(o => o.setName('需要人數').setDescription('預計招募人數 (預設 6 人)').setRequired(false).setMinValue(2).setMaxValue(30))
     )
-    .addSubcommandGroup(group =>
-      group.setName('組隊任務')
-        .setDescription('經典組隊任務 (PQ) 揪團子功能')
-        .addSubcommand(sub =>
-          sub.setName('發起')
-            .setDescription('發起組隊任務 (PQ)')
-            .addStringOption(o => o.setName('任務名稱').setDescription('例如：羅密歐、女神塔、101、毒霧').setRequired(true))
-            .addIntegerOption(o => o.setName('人數').setDescription('需要人數 (必填)').setRequired(true).setMinValue(2).setMaxValue(6))
-            .addStringOption(o => o.setName('開打時間').setDescription('例如：現在、半小時後、20:00').setRequired(true))
-            .addStringOption(o => o.setName('等級以上').setDescription('例如：70等以上、90等以上 (選填)').setRequired(false))
-            .addStringOption(o => o.setName('綁定職業').setDescription('例如：缺法師傳送、缺飛俠瞬移 (選填)').setRequired(false))
-        )
-        .addSubcommand(sub => sub.setName('查看').setDescription('查看進行中組隊任務列表'))
+    .addSubcommand(sub =>
+      sub.setName('組隊任務')
+        .setDescription('發起經典組隊任務 (PQ)')
+        .addStringOption(o => o.setName('任務名稱').setDescription('例如：羅密歐、女神塔、101、毒霧').setRequired(true))
+        .addIntegerOption(o => o.setName('人數').setDescription('需要人數 (必填)').setRequired(true).setMinValue(2).setMaxValue(6))
+        .addStringOption(o => o.setName('開打時間').setDescription('例如：現在、半小時後、20:00').setRequired(true))
+        .addStringOption(o => o.setName('等級以上').setDescription('例如：70等以上、90等以上 (選填)').setRequired(false))
+        .addStringOption(o => o.setName('綁定職業').setDescription('例如：缺法師傳送、缺飛俠瞬移 (選填)').setRequired(false))
     ),
 
+  // 2. /賭局 主指令 (發起)
   new SlashCommandBuilder()
     .setName('賭局')
-    .setDescription('社群競猜賭局系統 (技能書 / 衝卷 / 打寶 / 查看)')
+    .setDescription('社群競猜賭局系統 (技能書 / 衝卷 / 打寶)')
     .addSubcommand(sub =>
       sub.setName('技能書')
         .setDescription('發起技能書點擊二選一賭局 (會過 / 爆掉)')
@@ -750,8 +736,21 @@ const commands = [
         .addStringOption(o => o.setName('打寶門檻').setDescription('例如：打到價值 1000w 以上寶物、掉落日鏢算過').setRequired(true))
         .addStringOption(o => o.setName('截止時間').setDescription('填寫範例：1h、2h、今晚 23:00').setRequired(true))
         .addStringOption(o => o.setName('底池金額').setDescription('加碼底池 (選填，例如：500w、1000w)').setRequired(false))
-    )
-    .addSubcommand(sub => sub.setName('查看').setDescription('查看目前進行中的賭局面板、即時下注與結算')),
+    ),
+
+  // 3. /查看 統一查詢中心
+  new SlashCommandBuilder()
+    .setName('查看')
+    .setDescription('統一查詢中心 (查看進行中團練、突襲、組隊任務、全部揪團或賭局)')
+    .addStringOption(o => o.setName('類別').setDescription('選擇要查看的項目').setRequired(true)
+      .addChoices(
+        { name: '⚔️ 團練', value: 'VIEW_TRAINING' },
+        { name: '🐉 突襲', value: 'VIEW_RAID' },
+        { name: '🧩 組隊任務', value: 'VIEW_PQ' },
+        { name: '📜 全部揪團', value: 'VIEW_ALL_PARTIES' },
+        { name: '🎲 賭局', value: 'VIEW_BET' }
+      )
+    ),
 
   new SlashCommandBuilder().setName('幸運頻道').setDescription('抽取今日幸運頻道')
     .addIntegerOption(o => o.setName('最大頻道').setDescription('最大頻道數').setRequired(true).setMinValue(1)),
@@ -774,13 +773,12 @@ client.once(Events.ClientReady, async () => {
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
   } catch (e) { console.error('❌ 指令註冊失敗:', e); }
 
-  // 1. 每日 08:00 定時任務 (週二例行更新 + 每月 1 號 08:00 稽核未驗證名冊)
+  // 每日 08:00 定時任務
   cron.schedule('0 0 8 * * *', async () => {
     try {
       const now = new Date();
       const isFirstDayOfMonth = now.getDate() === 1;
 
-      // 每月 1 號 08:00 稽核未報到成員貼上「未驗證」身分組並推播通知
       if (isFirstDayOfMonth && db) {
         try {
           const profilesSnap = await db.collection('member_profiles').get();
@@ -803,7 +801,6 @@ client.once(Events.ClientReady, async () => {
         }
       }
 
-      // 199 等修煉倒數與每週二例行更新面板
       const channel = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
       if (channel && channel.isTextBased()) {
         if (db) {
@@ -833,7 +830,7 @@ client.once(Events.ClientReady, async () => {
     } catch (err) { console.error('定時任務異常:', err); }
   }, { timezone: 'Asia/Taipei' });
 
-  // 2. 每 10 分鐘巡檢共用帳號逾時並每 30 分鐘發送 DM 提醒
+  // 每 10 分鐘共用帳號巡檢
   cron.schedule('*/10 * * * *', async () => {
     if (!db) return;
     try {
@@ -867,7 +864,6 @@ client.once(Events.ClientReady, async () => {
   });
 });
 
-// 新人進群自動賦予未驗證並於報到頻道發送報到導引
 client.on(Events.GuildMemberAdd, async (member) => {
   member.roles.add(ROLES.UNVERIFIED).catch(() => {});
 
@@ -980,139 +976,70 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // 3. /揪團
+      // 3. /揪團 (發起)
       if (commandName === '揪團') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
-        const subGroup = interaction.options.getSubcommandGroup();
         const subCommand = interaction.options.getSubcommand();
+        await interaction.deferReply();
 
-        if (subCommand === '查看') {
-          await interaction.deferReply();
-          const snap = await db.collection('party_trainings').where('isClosed', '==', false).get();
-          if (snap.empty) return interaction.editReply('📜 目前沒有進行招募中的隊伍，使用 `/揪團` 發起一個吧！');
+        let target, startTime, bindReq, creatorDevice, duration, maxCount, partyType;
 
-          const nowMs = Date.now();
-          const activeParties = [];
-
-          for (const doc of snap.docs) {
-            const d = doc.data();
-            const createdMs = d.createdAt?.toMillis?.() || nowMs;
-            if (nowMs - createdMs > 43200000) {
-              await db.collection('party_trainings').doc(d.id).update({ isClosed: true }).catch(() => {});
-            } else {
-              activeParties.push(d);
-            }
-          }
-
-          if (activeParties.length === 0) {
-            return interaction.editReply('📜 目前所有揪團均已過期或關閉招募，使用 `/揪團` 發起一個新團吧！');
-          }
-
-          activeParties.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
-
-          const partyListEmbed = new EmbedBuilder().setColor(0x3498DB).setTitle('⚔️【進行中揪團總覽】');
-          const selectMenuOptions = [];
-
-          activeParties.slice(0, 5).forEach((d, idx) => {
-            const memberCount = d.members?.length || 0;
-            const buffPool = [];
-            (d.members || []).forEach(m => {
-              Object.entries(m.buffs || {}).forEach(([k, v]) => buffPool.push(`${k}(${v})`));
-            });
-
-            partyListEmbed.addFields({
-              name: `${idx + 1}. 📍 ${d.target} (${memberCount}/${d.maxCount}人) - 隊長: <@${d.creatorId}>`,
-              value: `⏰ **時間**：\`${d.startTime}\` | 📌 **限制**：\`${d.bindReq}\`\n✨ **Buff**：\`${buffPool.length ? buffPool.join(' | ') : '暫無'}\``,
-              inline: false
-            });
-
-            selectMenuOptions.push(
-              new StringSelectMenuOptionBuilder()
-                .setLabel(`${idx + 1}. 報名【${d.target}】(${memberCount}/${d.maxCount}人)`.substring(0, 100))
-                .setValue(`party_view_join_${d.id}`)
-                .setDescription(`時間: ${d.startTime}`.substring(0, 100))
-            );
-          });
-
-          const row = new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder().setCustomId('select_party_to_join').setPlaceholder('🔽 點此直接選擇並加入其中一團').addOptions(selectMenuOptions)
-          );
-
-          return await interaction.editReply({ embeds: [partyListEmbed], components: [row] });
+        if (subCommand === '團練') {
+          partyType = 'training';
+          target = interaction.options.getString('地點');
+          startTime = interaction.options.getString('開打時間');
+          bindReq = interaction.options.getString('綁定需求') || '無特殊限制';
+          creatorDevice = interaction.options.getString('自備機台') || '無自備';
+          duration = interaction.options.getString('備註時長') || '打氣場 / 配合隊伍';
+          maxCount = interaction.options.getInteger('需要人數') || 6;
+        } else if (subCommand === '突襲') {
+          partyType = 'raid';
+          target = interaction.options.getString('目標王');
+          startTime = interaction.options.getString('開打時間');
+          bindReq = interaction.options.getString('門檻要求') || '無特殊限制';
+          creatorDevice = '無自備';
+          duration = '打完為止';
+          maxCount = interaction.options.getInteger('需要人數') || 6;
+        } else if (subCommand === '組隊任務') {
+          partyType = 'pq';
+          target = interaction.options.getString('任務名稱');
+          maxCount = interaction.options.getInteger('人數');
+          startTime = interaction.options.getString('開打時間');
+          const minLv = interaction.options.getString('等級以上') || '無限制';
+          const bindJob = interaction.options.getString('綁定職業') || '無限制';
+          bindReq = `等級: ${minLv} | 綁定: ${bindJob}`;
+          creatorDevice = '無自備';
+          duration = '連刷/配合隊伍';
         }
 
-        if (subCommand === '發起') {
-          await interaction.deferReply();
-          let target, startTime, bindReq, creatorDevice, duration, maxCount, partyType;
+        const partyRef = db.collection('party_trainings').doc();
+        const partyData = {
+          id: partyRef.id,
+          creatorId: interaction.user.id,
+          partyType, target, startTime, bindReq, creatorDevice, duration, maxCount,
+          members: [],
+          isClosed: false,
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        };
 
-          if (subGroup === '團練') {
-            partyType = 'training';
-            target = interaction.options.getString('地點');
-            startTime = interaction.options.getString('開打時間');
-            bindReq = interaction.options.getString('綁定需求') || '無特殊限制';
-            creatorDevice = interaction.options.getString('自備機台') || '無自備';
-            duration = interaction.options.getString('備註時長') || '打氣場 / 配合隊伍';
-            maxCount = interaction.options.getInteger('需要人數') || 6;
-          } else if (subGroup === '突襲') {
-            partyType = 'raid';
-            target = interaction.options.getString('目標王');
-            startTime = interaction.options.getString('開打時間');
-            bindReq = interaction.options.getString('門檻要求') || '無特殊限制';
-            creatorDevice = '無自備';
-            duration = '打完為止';
-            maxCount = interaction.options.getInteger('需要人數') || 6;
-          } else if (subGroup === '組隊任務') {
-            partyType = 'pq';
-            target = interaction.options.getString('任務名稱');
-            maxCount = interaction.options.getInteger('人數');
-            startTime = interaction.options.getString('開打時間');
-            const minLv = interaction.options.getString('等級以上') || '無限制';
-            const bindJob = interaction.options.getString('綁定職業') || '無限制';
-            bindReq = `等級: ${minLv} | 綁定: ${bindJob}`;
-            creatorDevice = '無自備';
-            duration = '連刷/配合隊伍';
-          }
+        const msg = await interaction.editReply({
+          embeds: [createPartyEmbed(partyData)],
+          components: createPartyComponents(partyRef.id, false)
+        });
 
-          const partyRef = db.collection('party_trainings').doc();
-          const partyData = {
-            id: partyRef.id,
-            creatorId: interaction.user.id,
-            partyType, target, startTime, bindReq, creatorDevice, duration, maxCount,
-            members: [],
-            isClosed: false,
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
-          };
-
-          const msg = await interaction.editReply({
-            embeds: [createPartyEmbed(partyData)],
-            components: createPartyComponents(partyRef.id, false)
-          });
-
-          partyData.channelId = interaction.channelId;
-          partyData.messageId = msg.id;
-          await partyRef.set(partyData);
-          return;
-        }
+        partyData.channelId = interaction.channelId;
+        partyData.messageId = msg.id;
+        await partyRef.set(partyData);
+        return;
       }
 
-      // 4. /賭局
+      // 4. /賭局 (發起)
       if (commandName === '賭局') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
         const subCommand = interaction.options.getSubcommand();
 
-        if (subCommand === '查看') {
-          await interaction.deferReply();
-          const activeBetDoc = await getActiveBetDoc();
-          if (!activeBetDoc) return interaction.editReply('🎲 目前沒有進行中的賭局，輸入 `/賭局` 來開一盤吧！');
-          const betData = activeBetDoc.data();
-          return await interaction.editReply({
-            embeds: [createMultiBetEmbed(betData)],
-            components: createMultiBetComponents(betData.id, betData.options, betData.isScroll)
-          });
-        }
-
         const activeBet = await getActiveBetDoc();
-        if (activeBet) return interaction.reply({ content: '⚠️ 目前已有進行中的賭局，請先使用 `/賭局 查看` 或等待結算！', ephemeral: true });
+        if (activeBet) return interaction.reply({ content: '⚠️ 目前已有進行中的賭局，請先使用 `/查看 賭局` 或等待結算！', ephemeral: true });
 
         if (subCommand === '技能書') {
           await interaction.deferReply();
@@ -1241,6 +1168,81 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
       }
 
+      // 5. /查看 (統一查詢中心)
+      if (commandName === '查看') {
+        if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
+        const viewType = interaction.options.getString('類別');
+        await interaction.deferReply();
+
+        // [A] 查看賭局
+        if (viewType === 'VIEW_BET') {
+          const activeBetDoc = await getActiveBetDoc();
+          if (!activeBetDoc) return interaction.editReply('🎲 目前沒有進行中的賭局，輸入 `/賭局` 來開一盤吧！');
+          const betData = activeBetDoc.data();
+          return await interaction.editReply({
+            embeds: [createMultiBetEmbed(betData)],
+            components: createMultiBetComponents(betData.id, betData.options, betData.isScroll)
+          });
+        }
+
+        // [B] 查看揪團類別 (團練 / 突襲 / 組隊任務 / 全部)
+        const snap = await db.collection('party_trainings').where('isClosed', '==', false).get();
+        if (snap.empty) return interaction.editReply('📜 目前沒有進行招募中的隊伍，使用 `/揪團` 發起一個吧！');
+
+        const nowMs = Date.now();
+        let activeParties = [];
+
+        for (const doc of snap.docs) {
+          const d = doc.data();
+          const createdMs = d.createdAt?.toMillis?.() || nowMs;
+          if (nowMs - createdMs > 43200000) {
+            await db.collection('party_trainings').doc(d.id).update({ isClosed: true }).catch(() => {});
+          } else {
+            activeParties.push(d);
+          }
+        }
+
+        if (viewType === 'VIEW_TRAINING') activeParties = activeParties.filter(p => p.partyType === 'training');
+        else if (viewType === 'VIEW_RAID') activeParties = activeParties.filter(p => p.partyType === 'raid');
+        else if (viewType === 'VIEW_PQ') activeParties = activeParties.filter(p => p.partyType === 'pq');
+
+        if (activeParties.length === 0) {
+          return interaction.editReply('📜 該分類目前沒有進行招募中的隊伍，使用 `/揪團` 發起一個新團吧！');
+        }
+
+        activeParties.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
+
+        const partyListEmbed = new EmbedBuilder().setColor(0x3498DB).setTitle('⚔️【進行中揪團總覽】');
+        const selectMenuOptions = [];
+
+        activeParties.slice(0, 5).forEach((d, idx) => {
+          const memberCount = d.members?.length || 0;
+          const buffPool = [];
+          (d.members || []).forEach(m => {
+            Object.entries(m.buffs || {}).forEach(([k, v]) => buffPool.push(`${k}(${v})`));
+          });
+
+          partyListEmbed.addFields({
+            name: `${idx + 1}. 📍 ${d.target} (${memberCount}/${d.maxCount}人) - 隊長: <@${d.creatorId}>`,
+            value: `⏰ **時間**：\`${d.startTime}\` | 📌 **限制**：\`${d.bindReq}\`\n✨ **Buff**：\`${buffPool.length ? buffPool.join(' | ') : '暫無'}\``,
+            inline: false
+          });
+
+          selectMenuOptions.push(
+            new StringSelectMenuOptionBuilder()
+              .setLabel(`${idx + 1}. 報名【${d.target}】(${memberCount}/${d.maxCount}人)`.substring(0, 100))
+              .setValue(`party_view_join_${d.id}`)
+              .setDescription(`時間: ${d.startTime}`.substring(0, 100))
+          );
+        });
+
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder().setCustomId('select_party_to_join').setPlaceholder('🔽 點此直接選擇並加入其中一團').addOptions(selectMenuOptions)
+        );
+
+        return await interaction.editReply({ embeds: [partyListEmbed], components: [row] });
+      }
+
       if (commandName === '幸運頻道') {
         await interaction.deferReply();
         const max = interaction.options.getInteger('最大頻道');
@@ -1290,12 +1292,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [B] 按鈕處理 (放圖、角色狀態、揪團、賭局)
+    // [B] 按鈕處理
     // ----------------------------------------
     if (interaction.isButton()) {
       const customId = interaction.customId;
 
-      // === 新人報到引流按鈕 ===
       if (customId === 'btn_new_member_register') {
         const prevData = await fetchUserDocSafe(interaction.user.id);
         const defaultJob = Object.keys(ROLES.JOBS)[0];
@@ -1303,7 +1304,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(createRegisterModal(defaultJob, prevData));
       }
 
-      // === 放圖 / 地圖交接操作 ===
+      // 放圖操作
       if (customId.startsWith('map_take_')) {
         await interaction.deferReply({ ephemeral: true });
         const mapId = customId.replace('map_take_', '');
@@ -1377,7 +1378,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`🤝 地圖【**${mapData.mapName}**】交接完成，面板已順利結案！`);
       }
 
-      // === 角色共用狀態操作 ===
+      // 角色共用操作
       if (customId.startsWith('char_act_online_')) {
         const charIgn = customId.replace('char_act_online_', '');
         const modal = new ModalBuilder().setCustomId(`modal_char_online_${charIgn}`).setTitle(`登記上線 - 【${charIgn}】`);
@@ -1458,7 +1459,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ content: `⚡ 已強制將【**${charIgn}**】收回並重置為【🟢 閒置中】！`, embeds: [embed], components });
       }
 
-      // === 揪團報名 ===
+      // 揪團報名
       if (customId.startsWith('party_join_')) {
         const partyId = customId.replace('party_join_', '');
         const partyDoc = await db.collection('party_trainings').doc(partyId).get();
@@ -1569,7 +1570,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(createRegisterModal(defaultJob, prevData));
       }
 
-      // === 賭局相關 ===
+      // 賭局管理
       if (customId.startsWith('bet_admin_pause_')) {
         if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) return interaction.reply({ content: '❌ 僅伺服器管理員可操作！', ephemeral: true });
         const betId = customId.replace('bet_admin_pause_', '');

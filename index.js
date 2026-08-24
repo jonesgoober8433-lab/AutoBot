@@ -13,7 +13,38 @@ const admin = require('firebase-admin');
 const cron = require('node-cron');
 
 // ==========================================
-// 1. 常數與設定
+// 1. 喚醒伺服器設定 (Express - 採用第一版設定)
+// ==========================================
+const app = express();
+app.get('/', (req, res) => {
+  res.send('Auto-Bot Server is Online!');
+});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`✅ 網頁伺服器已啟動於 Port ${PORT}`);
+});
+
+// ==========================================
+// 2. Firebase 初始化連線 (採用第一版設定)
+// ==========================================
+let db;
+try {
+  if (process.env.FIREBASE_CREDENTIALS) {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    db = admin.firestore();
+    console.log('✅ Firebase Firestore 連線成功');
+  } else {
+    console.log('⚠️ 未偵測到 FIREBASE_CREDENTIALS，跳過資料庫連線');
+  }
+} catch (error) {
+  console.error('❌ Firebase 初始化失敗:', error.message);
+}
+
+// ==========================================
+// 3. 常數與系統變數
 // ==========================================
 const REPORT_CHANNEL_ID = process.env.REPORT_CHANNEL_ID || '1476762995454640159';
 const WELCOME_REGISTER_CHANNEL_ID = '1540052273743532122';
@@ -65,7 +96,7 @@ function isSuperAdmin(userId, perms) {
 }
 
 // ==========================================
-// 2. 輔助工具函式
+// 4. 輔助工具函式
 // ==========================================
 function parseDeadline(inputStr) {
   if (!inputStr) return null;
@@ -130,18 +161,6 @@ function calculateMinTransfers(balances) {
   return transfers;
 }
 
-// ==========================================
-// 3. 資料庫存取
-// ==========================================
-let db;
-try {
-  if (process.env.FIREBASE_CREDENTIALS) {
-    admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_CREDENTIALS)) });
-    db = admin.firestore();
-    console.log('✅ Firebase 連線成功');
-  }
-} catch (e) { console.error('❌ Firebase 連線失敗:', e.message); }
-
 async function fetchUserDocSafe(userId) {
   if (!db) return {};
   try {
@@ -167,7 +186,7 @@ async function getActiveBetDoc() {
 }
 
 // ==========================================
-// 4. UI 模組建構
+// 5. UI 模組建構
 // ==========================================
 function buildWizardConfigCard(userId) {
   const session = wizardSessionMap.get(userId);
@@ -489,7 +508,7 @@ function buildJobQueryMenu() {
 }
 
 // ==========================================
-// 5. 頂層指令註冊 (Guild 秒速同步)
+// 6. 頂層指令註冊 (Guild 秒速同步)
 // ==========================================
 const commands = [
   new SlashCommandBuilder()
@@ -595,15 +614,15 @@ const commands = [
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
 
 client.once(Events.ClientReady, async () => {
-  console.log(`✅ Bot 上線：${client.user.tag}`);
+  console.log(`✅ 機器人已成功上線，登入身分：${client.user.tag}`);
   try {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     
-    // 1. 強制清空全域指令快取
+    // 1. 強制清空舊版全域指令快取 (徹底根除重複顯示問題)
     await rest.put(Routes.applicationCommands(client.user.id), { body: [] });
     console.log('🧹 已清空舊版全域指令快取');
 
-    // 2. 僅向機器人加入的伺服器註冊 (秒速刷新客戶端選單)
+    // 2. 僅向加入的伺服器註冊 (秒速刷新)
     for (const guild of client.guilds.cache.values()) {
       await rest.put(
         Routes.applicationGuildCommands(client.user.id, guild.id),
@@ -682,7 +701,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
 });
 
 // ==========================================
-// 6. 核心互動監聽
+// 7. 核心互動監聽
 // ==========================================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
@@ -1034,6 +1053,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton()) {
       const customId = interaction.customId;
 
+      // 經驗計算器：開始
       if (customId === 'exp_calc_start') {
         const startTime = Date.now();
         expTrackerMap.set(interaction.user.id, { startTime });
@@ -1042,6 +1062,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.update({ embeds: [embed], components: comps });
       }
 
+      // 經驗計算器：取消
       if (customId === 'exp_calc_cancel') {
         expTrackerMap.delete(interaction.user.id);
         const embed = createExpCalculatorEmbed(null);
@@ -1049,6 +1070,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.update({ embeds: [embed], components: comps });
       }
 
+      // 經驗計算器：結束（彈出輸入框）
       if (customId === 'exp_calc_stop') {
         const session = expTrackerMap.get(interaction.user.id);
         if (!session?.startTime) return interaction.reply({ content: '⚠️ 計時尚未開始，請先點擊開始！', ephemeral: true });
@@ -1063,6 +1085,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(modal);
       }
 
+      // 新手報到精靈啟動按鈕
       if (customId === 'btn_trigger_wizard_main') {
         const prev = await fetchUserDocSafe(interaction.user.id);
 
@@ -1093,6 +1116,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(modal);
       }
 
+      // 加填分身按鈕
       if (customId === 'wiz_btn_add_sub') {
         const session = wizardSessionMap.get(interaction.user.id);
         if (!session) return interaction.reply({ content: '❌ 報到已逾時，請重新點擊報到！', ephemeral: true });
@@ -1109,6 +1133,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(modal);
       }
 
+      // 精靈完成建檔按鈕
       if (customId === 'wiz_btn_finish') {
         await interaction.deferReply({ ephemeral: true });
         const session = wizardSessionMap.get(interaction.user.id);
@@ -1182,7 +1207,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`🎉 恭喜完成名冊建檔！成員 <@${targetUid}> 的本尊與 ${session.subs.length} 隻分身已全部獨立拆分建檔完成！`);
       }
 
-      // 地圖放圖操作
+      // 地圖放圖操作按鈕
       if (customId.startsWith('map_take_') || customId.startsWith('map_cancel_') || customId.startsWith('map_done_')) {
         await interaction.deferReply({ ephemeral: true });
         const parts = customId.split('_');
@@ -1220,7 +1245,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`✅ 操作成功！`);
       }
 
-      // 角色狀態操作按鈕
+      // 角色狀態操作按鈕 (雙按鈕直覺化)
       if (customId.startsWith('char_act_online_')) {
         const ign = customId.replace('char_act_online_', '');
         const modal = new ModalBuilder().setCustomId(`modal_char_online_${ign}`).setTitle(`登記上線 - 【${ign}】`);
@@ -1781,7 +1806,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
     }
   } catch (err) {
-    console.error('互動處理錯誤:', err);
+    console.error('處理互動時發生錯誤:', err);
   }
 });
 

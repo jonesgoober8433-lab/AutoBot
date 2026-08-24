@@ -42,7 +42,6 @@ const JOB_BUFFS = {
 const wizardSessionMap = new Map();
 const userChoiceMap = new Map();
 
-// 10 組超搞笑同情抖內文案庫
 const PITY_QUOTES = [
   "贊助苦主一包強力吸水面紙擦眼淚...",
   "全爆補助金：給老哥買碗暖心熱湯喝...",
@@ -167,7 +166,7 @@ async function getActiveBetDoc() {
 }
 
 // ==========================================
-// 4. UI 模組建構
+// 4. UI 模組建構 (自動帶入舊資料)
 // ==========================================
 function buildWizardConfigCard(userId) {
   const session = wizardSessionMap.get(userId);
@@ -203,6 +202,7 @@ function buildWizardConfigCard(userId) {
     .setColor(0x5865F2)
     .setTitle(`📝【名冊精靈登記】正在設定：${isMain ? '👑 本尊角色' : `⚔️ 分身角色 #${session.subs.length + 1}`}`)
     .setDescription(
+      `🎯 **目標登記成員**：<@${session.targetUserId}>\n` +
       `🔹 **角色ID**：\`${char.ign}\`\n` +
       `🔹 **職業**：\`${char.job || '請在下方選單選擇'}\`\n` +
       `🔹 **等級**：\`Lv. ${char.level}\`\n` +
@@ -466,7 +466,7 @@ function buildJobQueryMenu() {
 }
 
 // ==========================================
-// 5. 頂層 8 條極簡指令註冊
+// 5. 頂層指令註冊 (一般成員 8 條 + 管理員專屬 1 條)
 // ==========================================
 const commands = [
   new SlashCommandBuilder()
@@ -549,7 +549,19 @@ const commands = [
   new SlashCommandBuilder()
     .setName('幸運頻道')
     .setDescription('抽取今日幸運頻道')
-    .addIntegerOption(o => o.setName('最大頻道').setDescription('最大頻道數').setRequired(true).setMinValue(1))
+    .addIntegerOption(o => o.setName('最大頻道').setDescription('最大頻道數').setRequired(true).setMinValue(1)),
+
+  // 9. 管理員專屬指令 (透過 Administrator 權限限制，一般成員不可見)
+  new SlashCommandBuilder()
+    .setName('管理員功能')
+    .setDescription('【超級管理員專用】代填/代更新成員名冊與特權管理')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(o => o.setName('模式').setDescription('選擇管理操作').setRequired(true)
+      .addChoices(
+        { name: '📝 代填/代更新成員名冊', value: 'ADMIN_PROXY_REGISTER' }
+      )
+    )
+    .addUserOption(o => o.setName('對象成員').setDescription('選擇要代為登記/編輯的 Discord 成員').setRequired(true))
 ].map(c => c.toJSON());
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
@@ -561,27 +573,63 @@ client.once(Events.ClientReady, async () => {
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
   } catch (e) { console.error('❌ 指令註冊失敗:', e); }
 
-  cron.schedule('0 0 8 * * *', async () => {
+  // -------------------------------------------------------------
+  // 背景自動化排程 (Cron Schedule)
+  // -------------------------------------------------------------
+  // 1. 每月 1 號 08:00 稽核
+  cron.schedule('0 0 8 1 * *', async () => {
+    if (!db) return;
     try {
-      const now = new Date();
-      if (now.getDate() === 1 && db) {
-        const snap = await db.collection('member_profiles').get();
-        const regUids = new Set();
-        snap.forEach(d => regUids.add(d.data().userId));
-        for (const guild of client.guilds.cache.values()) {
-          const members = await guild.members.fetch().catch(() => null);
-          if (members) {
-            for (const m of members.values()) {
-              if (!m.user.bot && !regUids.has(m.id)) {
-                await m.roles.add(ROLES.UNVERIFIED).catch(() => {});
-                await m.send(`📢 **【公會每月例行提醒】** 請前往 <#${WELCOME_REGISTER_CHANNEL_ID}> 或輸入 \`/角色報到\` 登記名冊！`).catch(() => {});
-              }
+      const snap = await db.collection('member_profiles').get();
+      const regUids = new Set();
+      snap.forEach(d => regUids.add(d.data().userId));
+      for (const guild of client.guilds.cache.values()) {
+        const members = await guild.members.fetch().catch(() => null);
+        if (members) {
+          for (const m of members.values()) {
+            if (!m.user.bot && !regUids.has(m.id)) {
+              await m.roles.add(ROLES.UNVERIFIED).catch(() => {});
+              await m.send(`📢 **【公會每月例行提醒】** 請前往 <#${WELCOME_REGISTER_CHANNEL_ID}> 或輸入 \`/角色報到\` 登記名冊！`).catch(() => {});
             }
           }
         }
       }
-    } catch (e) { console.error('排程稽核異常:', e.message); }
+    } catch (e) { console.error('每月稽核異常:', e.message); }
   }, { timezone: 'Asia/Taipei' });
+
+  // 2. 廣播一：每週一 09:00 提醒突襲王
+  cron.schedule('0 0 9 * * 1', async () => {
+    try {
+      const ch = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
+      if (ch && ch.isTextBased()) {
+        const embed = new EmbedBuilder()
+          .setColor(0xE74C3C)
+          .setTitle('🔔【每週例行提醒】突襲遠征結算倒數')
+          .setDescription('週二即將進行維護/重置，請各位冒險家把握時間打完突襲王！');
+        await ch.send({ embeds: [embed] });
+      }
+    } catch (e) { console.error('週一廣播異常:', e.message); }
+  }, { timezone: 'Asia/Taipei' });
+
+  // 3. 廣播二：每週二 09:00 與 19:00 推播名冊維護
+  const sendTuesdayBroadcast = async () => {
+    try {
+      const ch = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
+      if (ch && ch.isTextBased()) {
+        const embed = new EmbedBuilder()
+          .setColor(0x5865F2)
+          .setTitle('🔔【每週名冊維護】請大家更新角色資訊唷！')
+          .setDescription('點擊下方按鈕將**自動帶入您上週的登記資料**，快速調整等級即可秒速完成更新！');
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('btn_trigger_wizard_main').setLabel('📝 快速更新名冊 (自動帶入舊資料)').setStyle(ButtonStyle.Success)
+        );
+        await ch.send({ embeds: [embed], components: [row] });
+      }
+    } catch (e) { console.error('週二廣播異常:', e.message); }
+  };
+
+  cron.schedule('0 0 9 * * 2', sendTuesdayBroadcast, { timezone: 'Asia/Taipei' });
+  cron.schedule('0 0 19 * * 2', sendTuesdayBroadcast, { timezone: 'Asia/Taipei' });
 });
 
 client.on(Events.GuildMemberAdd, async (member) => {
@@ -602,7 +650,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // ----------------------------------------
-    // [A] 斜線指令 (8 條頂層指令分派)
+    // [A] 斜線指令分派
     // ----------------------------------------
     if (interaction.isChatInputCommand()) {
       const { commandName } = interaction;
@@ -614,7 +662,40 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.reply({ embeds: [embed], components: [row] });
       }
 
-      // 2. /角色狀態
+      // 2. /管理員功能 (代填/代更新名冊)
+      if (commandName === '管理員功能') {
+        if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) return interaction.reply({ content: '❌ 僅超級管理員可使用！', ephemeral: true });
+        const targetUser = interaction.options.getUser('對象成員');
+        const prev = await fetchUserDocSafe(targetUser.id);
+
+        wizardSessionMap.set(interaction.user.id, {
+          userId: interaction.user.id,
+          targetUserId: targetUser.id,
+          step: 'MAIN',
+          playtime: prev.playtime || '未填',
+          joinReason: prev.joinReason || '管理員代填',
+          main: {
+            ign: prev.mainIgn || '',
+            job: prev.mainJob || '黑騎士',
+            level: prev.mainLevel || '120',
+            owners: prev.owners || [targetUser.id],
+            authorizedUsers: prev.authorizedUsers || []
+          },
+          subs: prev.subs || [],
+          currentSub: null
+        });
+
+        const modal = new ModalBuilder().setCustomId('modal_wizard_step1_main').setTitle(`代填【${targetUser.username}】本尊資料`);
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_ign').setLabel('本尊遊戲 ID (必填)').setValue(prev.mainIgn || '').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_level').setLabel('本尊等級 (必填)').setValue(prev.mainLevel || '120').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_playtime').setLabel('遊玩時間 (選填)').setValue(prev.playtime || '').setStyle(TextInputStyle.Short).setRequired(false)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_join_reason').setLabel('加入原因 / 備註 (選填)').setValue(prev.joinReason || '管理員代填').setStyle(TextInputStyle.Paragraph).setRequired(false))
+        );
+        return await interaction.showModal(modal);
+      }
+
+      // 3. /角色狀態
       if (commandName === '角色狀態') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
         const action = interaction.options.getString('功能');
@@ -649,7 +730,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return await interaction.editReply({ content: '👉 **請選擇要查看狀態的角色：**', components: [row] });
         }
 
-        // 下拉選單授權
         if (action === 'ACT_AUTH') {
           await interaction.deferReply({ ephemeral: true });
           const myProfile = await fetchUserDocSafe(interaction.user.id);
@@ -666,7 +746,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return await interaction.editReply({ content: '👉 **【步驟 1/2】請選擇要借出的角色：**', components: [row] });
         }
 
-        // 下拉選單撤銷
         if (action === 'ACT_REVOKE') {
           await interaction.deferReply({ ephemeral: true });
           const myProfile = await fetchUserDocSafe(interaction.user.id);
@@ -683,7 +762,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return await interaction.editReply({ content: '👉 **【步驟 1/2】請選擇要收回權限的角色：**', components: [row] });
         }
 
-        // 全服總覽 (管理員控制台)
         if (action === 'ACT_MATRIX') {
           if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) return interaction.reply({ content: '❌ 僅超級管理員可使用！', ephemeral: true });
           await interaction.deferReply({ ephemeral: true });
@@ -711,7 +789,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
       }
 
-      // 3. /個人名片
+      // 4. /個人名片
       if (commandName === '個人名片') {
         const mode = interaction.options.getString('模式');
         if (mode === 'CARD_MY') {
@@ -733,7 +811,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               { name: `⚔️ 分身角色 (${(d.subs || []).length} 隻)`, value: subList, inline: false }
             );
 
-          const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('btn_trigger_wizard_main').setLabel('✏️ 重新登記/編輯名冊').setStyle(ButtonStyle.Primary));
+          const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('btn_trigger_wizard_main').setLabel('✏️ 快速更新名冊 (帶入舊資料)').setStyle(ButtonStyle.Primary));
           return await interaction.editReply({ embeds: [embed], components: [row] });
         }
 
@@ -744,7 +822,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
       }
 
-      // 4. /揪團
+      // 5. /揪團
       if (commandName === '揪團') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
         await interaction.deferReply();
@@ -768,7 +846,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // 5. /賭局
+      // 6. /賭局
       if (commandName === '賭局') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
         const activeBet = await getActiveBetDoc();
@@ -810,7 +888,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ embeds: [createMultiBetEmbed(bData)], components: createMultiBetComponents(bRef.id, options, bData.isScroll) });
       }
 
-      // 6. /查看
+      // 7. /查看
       if (commandName === '查看') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
         const view = interaction.options.getString('類別');
@@ -850,7 +928,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ embeds: [embed], components: [row] });
       }
 
-      // 7. /放圖
+      // 8. /放圖
       if (commandName === '放圖') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
         await interaction.deferReply();
@@ -868,7 +946,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // 8. /幸運頻道
+      // 9. /幸運頻道
       if (commandName === '幸運頻道') {
         const max = interaction.options.getInteger('最大頻道');
         return await interaction.reply({ embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('🎲 今日幸運頻道').setDescription(`✨ **第 ${Math.floor(Math.random() * max) + 1} 頻道**`)] });
@@ -883,10 +961,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (customId === 'btn_trigger_wizard_main') {
         const prev = await fetchUserDocSafe(interaction.user.id);
+
+        wizardSessionMap.set(interaction.user.id, {
+          userId: interaction.user.id,
+          targetUserId: interaction.user.id,
+          step: 'MAIN',
+          playtime: prev.playtime || '未填',
+          joinReason: prev.joinReason || '未填',
+          main: {
+            ign: prev.mainIgn || '',
+            job: prev.mainJob || '黑騎士',
+            level: prev.mainLevel || '120',
+            owners: prev.owners || [interaction.user.id],
+            authorizedUsers: prev.authorizedUsers || []
+          },
+          subs: prev.subs || [],
+          currentSub: null
+        });
+
         const modal = new ModalBuilder().setCustomId('modal_wizard_step1_main').setTitle('名冊登記 - 步驟 1: 本尊資料');
         modal.addComponents(
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_ign').setLabel('本尊遊戲 ID (必填)').setValue(prev.mainIgn || '').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_level').setLabel('本尊等級 (必填)').setValue(prev.mainLevel || '').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_level').setLabel('本尊等級 (必填)').setValue(prev.mainLevel || '120').setStyle(TextInputStyle.Short).setRequired(true)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_playtime').setLabel('遊玩時間 (選填)').setValue(prev.playtime || '').setStyle(TextInputStyle.Short).setRequired(false)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_join_reason').setLabel('加入原因 (選填)').setValue(prev.joinReason || '').setStyle(TextInputStyle.Paragraph).setRequired(false))
         );
@@ -921,10 +1017,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const mainIgn = session.main.ign;
         const mainJob = session.main.job || '黑騎士';
         const mainLevel = session.main.level;
+        const targetUid = session.targetUserId || interaction.user.id;
 
         if (db) {
-          await db.collection('member_profiles').doc(interaction.user.id).set({
-            userId: interaction.user.id,
+          await db.collection('member_profiles').doc(targetUid).set({
+            userId: targetUid,
             mainIgn, mainJob, mainLevel,
             playtime: session.playtime,
             joinReason: session.joinReason,
@@ -959,10 +1056,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         try {
-          const member = await interaction.guild.members.fetch(interaction.user.id);
-          await member.roles.add(ROLES.VERIFIED).catch(() => {});
-          if (ROLES.JOBS[mainJob]) await member.roles.add(ROLES.JOBS[mainJob]).catch(() => {});
-          await member.setNickname(`[${mainLevel}_${mainJob}] ${mainIgn}`.substring(0, 32)).catch(() => {});
+          const member = await interaction.guild.members.fetch(targetUid).catch(() => null);
+          if (member) {
+            await member.roles.add(ROLES.VERIFIED).catch(() => {});
+            if (ROLES.JOBS[mainJob]) await member.roles.add(ROLES.JOBS[mainJob]).catch(() => {});
+            await member.setNickname(`[${mainLevel}_${mainJob}] ${mainIgn}`.substring(0, 32)).catch(() => {});
+          }
         } catch {}
 
         wizardSessionMap.delete(interaction.user.id);
@@ -973,10 +1072,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .setColor(0x57F287)
             .setTitle('🎉 冒險家名冊已成功更新！')
             .setDescription(`本尊：**${mainIgn}** ( <@&${ROLES.JOBS[mainJob] || ROLES.VERIFIED}> , LV. ${mainLevel} )`);
-          await publicChannel.send({ content: `<@${interaction.user.id}>`, embeds: [publicEmbed] });
+          await publicChannel.send({ content: `<@${targetUid}>`, embeds: [publicEmbed] });
         }
 
-        return await interaction.editReply(`🎉 恭喜您完成名冊建檔！您的本尊與 ${session.subs.length} 隻分身已全部獨立拆分建檔完成！`);
+        return await interaction.editReply(`🎉 恭喜完成名冊建檔！成員 <@${targetUid}> 的本尊與 ${session.subs.length} 隻分身已全部獨立拆分建檔完成！`);
       }
 
       // 地圖放圖操作
@@ -1017,7 +1116,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`✅ 操作成功！`);
       }
 
-      // 角色狀態按鈕
+      // 角色狀態操作按鈕
       if (customId.startsWith('char_act_online_')) {
         const ign = customId.replace('char_act_online_', '');
         const modal = new ModalBuilder().setCustomId(`modal_char_online_${ign}`).setTitle(`登記上線 - 【${ign}】`);
@@ -1051,8 +1150,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const prev = await fetchUserDocSafe(interaction.user.id);
         const rows = [];
         const r1 = new ActionRowBuilder();
-        if (prev.mainIgn) r1.addComponents(new ButtonBuilder().setCustomId(`party_reg_char_${pId}_main`).setLabel(`👑 本尊：${prev.mainIgn}`.substring(0, 80)).setStyle(ButtonStyle.Success));
-        (prev.subs || []).slice(0, 3).forEach((s, idx) => r1.addComponents(new ButtonBuilder().setCustomId(`party_reg_char_${pId}_sub_${idx}`).setLabel(`⚔️ ${s.ign}`.substring(0, 80)).setStyle(ButtonStyle.Primary)));
+        if (prev.mainIgn) r1.addComponents(new ButtonBuilder().setCustomId(`party_reg_char_${pId}_main`).setLabel(`👑 本尊：${prev.mainIgn}`).setStyle(ButtonStyle.Success));
+        (prev.subs || []).slice(0, 3).forEach((s, idx) => r1.addComponents(new ButtonBuilder().setCustomId(`party_reg_char_${pId}_sub_${idx}`).setLabel(`⚔️ ${s.ign}`).setStyle(ButtonStyle.Primary)));
         if (r1.components.length) rows.push(r1);
         rows.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`party_reg_char_${pId}_custom`).setLabel('✏️ 自訂角色報名').setStyle(ButtonStyle.Secondary)));
         return await interaction.reply({ content: '👉 **請選擇報名角色：**', components: rows, ephemeral: true });
@@ -1142,7 +1241,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`✅ 成功為 **${d.options[optIdx].name}** 下注 \`+100 萬 楓幣\`！`);
       }
 
-      // 自訂下注 Modal (含貼心選項標籤提示)
       if (customId.startsWith('bet_custom_btn_')) {
         const bId = customId.replace('bet_custom_btn_', '');
         const doc = await db.collection('active_bets').doc(bId).get();
@@ -1158,7 +1256,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(modal);
       }
 
-      // 同情抖內 Modal (含搞笑文案隨機提示)
       if (customId.startsWith('bet_pity_donate_')) {
         const bId = customId.replace('bet_pity_donate_', '');
         const randomQuote = getRandomPityQuote();
@@ -1176,7 +1273,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isStringSelectMenu() || interaction.isUserSelectMenu()) {
       const customId = interaction.customId;
 
-      // 1. 揪團：點此加入其中一團
       if (customId === 'select_party_to_join') {
         const partyId = interaction.values[0].replace('party_view_join_', '');
         const prev = await fetchUserDocSafe(interaction.user.id);
@@ -1189,7 +1285,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.reply({ content: '👉 **請選擇報名角色：**', components: rows, ephemeral: true });
       }
 
-      // 2. 授權步驟 1: 選角完成 -> 步驟 2: 選對象成員
       if (customId === 'select_auth_step1_char') {
         const charIgn = interaction.values[0];
         userChoiceMap.set(`temp_auth_char_${interaction.user.id}`, charIgn);
@@ -1199,7 +1294,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.update({ content: `👉 **【步驟 2/2】已選定角色【${charIgn}】，請選擇要授權的對象成員：**`, components: [rowUser] });
       }
 
-      // 3. 授權步驟 2: 完成授權寫入
       if (customId === 'select_auth_step2_user') {
         await interaction.deferUpdate();
         const charIgn = userChoiceMap.get(`temp_auth_char_${interaction.user.id}`);
@@ -1215,7 +1309,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ content: `🎉 成功授權 <@${targetUserId}> 借用您的角色【**${charIgn}**】！`, components: [] });
       }
 
-      // 4. 撤銷步驟 1: 選角完成 -> 步驟 2: 從該角色授權名單中選人撤銷
       if (customId === 'select_revoke_step1_char') {
         const charIgn = interaction.values[0];
         const statusDoc = await getCharStatusDoc(charIgn);
@@ -1238,7 +1331,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.update({ content: `👉 **【步驟 2/2】請選擇要收回【${charIgn}】權限的成員：**`, components: [row] });
       }
 
-      // 5. 撤銷步驟 2: 完成撤銷寫入
       if (customId === 'select_revoke_step2_user') {
         await interaction.deferUpdate();
         const charIgn = userChoiceMap.get(`temp_revoke_char_${interaction.user.id}`);
@@ -1253,7 +1345,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ content: `🔒 已成功收回 <@${targetUserId}> 對角色【**${charIgn}**】的借用授權！`, components: [] });
       }
 
-      // 6. 管理員全服總覽：選擇角色直接管理
       if (customId === 'select_matrix_manage_char') {
         const charIgn = interaction.values[0].replace('matrix_edit_', '');
         userChoiceMap.set(`temp_matrix_char_${interaction.user.id}`, charIgn);
@@ -1292,7 +1383,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`✅ 已成功重設【**${charIgn}**】的授權借用人為：${interaction.values.map(u => `<@${u}>`).join(', ') || '無'}`);
       }
 
-      // 7. 精靈報大表單操作
       if (customId === 'wiz_select_job') {
         const session = wizardSessionMap.get(interaction.user.id);
         if (!session) return interaction.reply({ content: '❌ 報到已逾時，請重新登記！', ephemeral: true });
@@ -1305,7 +1395,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (customId === 'wiz_select_owners') {
         const session = wizardSessionMap.get(interaction.user.id);
         if (!session) return interaction.reply({ content: '❌ 報到已逾時，請重新登記！', ephemeral: true });
-        const selectedUsers = Array.from(new Set([interaction.user.id, ...interaction.values]));
+        const targetUid = session.targetUserId || interaction.user.id;
+        const selectedUsers = Array.from(new Set([targetUid, ...interaction.values]));
         if (session.step === 'MAIN') session.main.owners = selectedUsers;
         else if (session.currentSub) session.currentSub.owners = selectedUsers;
         return await interaction.update(buildWizardConfigCard(interaction.user.id));
@@ -1399,16 +1490,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const playtime = interaction.fields.getTextInputValue('wiz_playtime')?.trim() || '未填';
         const joinReason = interaction.fields.getTextInputValue('wiz_join_reason')?.trim() || '未填';
 
-        wizardSessionMap.set(interaction.user.id, {
+        const session = wizardSessionMap.get(interaction.user.id) || {
           userId: interaction.user.id,
-          step: 'MAIN',
-          playtime,
-          joinReason,
-          main: { ign, job: '黑騎士', level, owners: [interaction.user.id], authorizedUsers: [] },
-          subs: [],
-          currentSub: null
-        });
+          targetUserId: interaction.user.id,
+          subs: []
+        };
 
+        session.step = 'MAIN';
+        session.playtime = playtime;
+        session.joinReason = joinReason;
+        session.main = {
+          ign,
+          job: session.main?.job || '黑騎士',
+          level,
+          owners: session.main?.owners || [session.targetUserId || interaction.user.id],
+          authorizedUsers: session.main?.authorizedUsers || []
+        };
+
+        wizardSessionMap.set(interaction.user.id, session);
         return await interaction.reply({ ...buildWizardConfigCard(interaction.user.id), ephemeral: true });
       }
 
@@ -1418,9 +1517,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const ign = interaction.fields.getTextInputValue('wiz_sub_ign').trim();
         const level = interaction.fields.getTextInputValue('wiz_sub_level').replace(/[^0-9]/g, '') || '120';
+        const targetUid = session.targetUserId || interaction.user.id;
 
         session.step = 'SUB';
-        session.currentSub = { ign, job: '主教', level, owners: [interaction.user.id], authorizedUsers: [] };
+        session.currentSub = { ign, job: '主教', level, owners: [targetUid], authorizedUsers: [] };
 
         return await interaction.reply({ ...buildWizardConfigCard(interaction.user.id), ephemeral: true });
       }

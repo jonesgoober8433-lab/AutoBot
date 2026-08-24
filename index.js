@@ -211,7 +211,7 @@ function createMapShareComponents(mapId, mapData) {
 }
 
 // ==========================================
-// 4. 帳號共用狀態模組
+// 4. 帳號共用狀態模組 (單一角色顆粒度)
 // ==========================================
 
 async function getCharStatusDoc(charIgn) {
@@ -659,24 +659,23 @@ try {
 } catch (e) { console.error('❌ Firebase Error:', e.message); }
 
 // ==========================================
-// 9. 斜線指令樹註冊 (含 /角色狀態 授權/撤銷)
+// 9. 斜線指令樹註冊
 // ==========================================
 const commands = [
-  // 角色狀態（儀表板 / 授權 / 撤銷）
   new SlashCommandBuilder()
     .setName('角色狀態')
-    .setDescription('共用帳號管理 (儀表板 / 一鍵授權 / 撤銷)')
+    .setDescription('共用帳號管理 (儀表板 / 一鍵單一角色授權 / 撤銷)')
     .addSubcommand(sub => sub.setName('儀表板').setDescription('查看與切換共用/借用角色的上線與在線狀態 (私密)'))
     .addSubcommand(sub =>
       sub.setName('授權')
-        .setDescription('授權指定成員借用您的角色')
+        .setDescription('授權指定成員借用您的特定角色')
         .addStringOption(o => o.setName('角色名稱').setDescription('填寫您要授權借出的角色ID (例: 拿錢來)').setRequired(true))
         .addUserOption(o => o.setName('對象成員').setDescription('選擇要授權借用的成員 (@小明)').setRequired(true))
     )
     .addSubcommand(sub =>
       sub.setName('撤銷')
-        .setDescription('收回指定成員對您角色的借用權限')
-        .addStringOption(o => o.setName('角色名稱').setDescription('填寫您要收回借出的角色ID').setRequired(true))
+        .setDescription('收回指定成員對您特定角色的借用權限')
+        .addStringOption(o => o.setName('角色名稱').setDescription('填寫您要收回借出的角色ID (例: 拿錢來)').setRequired(true))
         .addUserOption(o => o.setName('對象成員').setDescription('選擇要撤銷借用權限的成員 (@小明)').setRequired(true))
     ),
 
@@ -910,7 +909,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isChatInputCommand()) {
       const { commandName } = interaction;
 
-      // 1. /角色狀態 (儀表板 / 授權 / 撤銷)
+      // 1. /角色狀態 (儀表板 / 單一角色授權 / 撤銷)
       if (commandName === '角色狀態') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
         const subCommand = interaction.options.getSubcommand();
@@ -918,37 +917,42 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (subCommand === '儀表板') {
           await interaction.deferReply({ ephemeral: true });
 
-          const myProfile = await fetchUserDocSafe(interaction.user.id);
-          const myChars = [];
+          const allCharsSnap = await db.collection('char_statuses').get();
+          const isSuper = interaction.user.id === SUPER_ADMIN_ID;
 
-          if (myProfile.mainIgn) myChars.push({ ign: myProfile.mainIgn, job: myProfile.mainJob, isOwner: true });
-          if (myProfile.subs && Array.isArray(myProfile.subs)) {
-            myProfile.subs.forEach(s => {
-              if (s?.ign) myChars.push({ ign: s.ign, job: s.job, isOwner: true });
-            });
-          }
+          const myOwnedChars = [];
+          const authorizedChars = [];
+          const otherChars = [];
 
-          const allProfilesSnap = await db.collection('member_profiles').get();
-          allProfilesSnap.forEach(doc => {
+          allCharsSnap.forEach(doc => {
             const d = doc.data();
-            if (d.userId !== interaction.user.id) {
-              if (d.sharedUsers && Array.isArray(d.sharedUsers) && d.sharedUsers.includes(interaction.user.id)) {
-                if (d.mainIgn && !myChars.some(c => c.ign.toLowerCase() === d.mainIgn.toLowerCase())) {
-                  myChars.push({ ign: d.mainIgn, job: d.mainJob, isOwner: false });
-                }
-              }
+            const charIgn = d.charIgn;
+            const job = d.job || '冒險家';
+            const owners = d.owners || [];
+            const authUsers = d.authorizedUsers || [];
+
+            if (owners.includes(interaction.user.id)) {
+              myOwnedChars.push({ ign: charIgn, job, type: 'OWNED', label: `👑 本人角色：${charIgn} (${job})` });
+            } else if (authUsers.includes(interaction.user.id)) {
+              authorizedChars.push({ ign: charIgn, job, type: 'AUTH', label: `🤝 已授權借用：${charIgn} (${job})` });
+            } else if (isSuper) {
+              otherChars.push({ ign: charIgn, job, type: 'OTHER', label: `🌐 全服角色：${charIgn} (${job})` });
             }
           });
 
-          if (myChars.length === 0) {
+          const displayChars = isSuper
+            ? [...myOwnedChars, ...authorizedChars, ...otherChars]
+            : [...myOwnedChars, ...authorizedChars];
+
+          if (displayChars.length === 0) {
             return interaction.editReply('📜 您尚未在 `/報到` 中登記角色，或尚未獲得任何角色的借用授權。');
           }
 
-          const options = myChars.map(c =>
+          const options = displayChars.map(c =>
             new StringSelectMenuOptionBuilder()
-              .setLabel(`${c.isOwner ? '👑' : '🤝'} ${c.ign} (${c.job})`.substring(0, 100))
+              .setLabel(c.label.substring(0, 100))
               .setValue(`char_select_${c.ign}`)
-              .setDescription(`${c.isOwner ? '擁有者角色' : '已授權借用角色'}`)
+              .setDescription(`${c.type === 'OWNED' ? '擁有者特權' : (c.type === 'AUTH' ? '已獲借用授權' : '上帝視角全服角色')}`)
           );
 
           const row = new ActionRowBuilder().addComponents(
@@ -966,31 +970,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const targetIgn = interaction.options.getString('角色名稱').trim();
           const targetUser = interaction.options.getUser('對象成員');
 
-          const myProfile = await fetchUserDocSafe(interaction.user.id);
-          const isMyMain = myProfile.mainIgn?.toLowerCase() === targetIgn.toLowerCase();
-          const isMySub = myProfile.subs && myProfile.subs.some(s => s?.ign?.toLowerCase() === targetIgn.toLowerCase());
-          const isAdmin = isSuperAdmin(interaction.user.id, interaction.memberPermissions);
-
-          if (!isMyMain && !isMySub && !isAdmin) {
-            return interaction.editReply(`❌ 您不是角色【**${targetIgn}**】的所有權人，無法進行授權操作！`);
-          }
-
-          const currentShared = myProfile.sharedUsers || [];
-          if (!currentShared.includes(targetUser.id)) {
-            currentShared.push(targetUser.id);
-            await db.collection('member_profiles').doc(interaction.user.id).update({ sharedUsers: currentShared });
-          }
-
           const statusDoc = await getCharStatusDoc(targetIgn);
-          const owners = statusDoc?.owners || [interaction.user.id];
-          if (!owners.includes(interaction.user.id)) owners.push(interaction.user.id);
+          if (!statusDoc) return interaction.editReply(`❌ 找不到角色【**${targetIgn}**】！請確認該角色已在 \`/報到\` 中登記。`);
 
-          await db.collection('char_statuses').doc(targetIgn.toLowerCase()).set({
-            charIgn: targetIgn,
-            owners
-          }, { merge: true });
+          const isOwner = statusDoc.owners?.includes(interaction.user.id) || isSuperAdmin(interaction.user.id, interaction.memberPermissions);
+          if (!isOwner) return interaction.editReply(`❌ 您不是角色【**${targetIgn}**】的所有權人，無法進行授權操作！`);
 
-          return await interaction.editReply(`🎉 成功授權 <@${targetUser.id}> 借用您的角色【**${targetIgn}**】！\n對方的 \`/角色狀態 儀表板\` 選單中已可直接查看與登記該角色！`);
+          const authUsers = statusDoc.authorizedUsers || [];
+          if (!authUsers.includes(targetUser.id)) {
+            authUsers.push(targetUser.id);
+            await db.collection('char_statuses').doc(targetIgn.toLowerCase()).update({ authorizedUsers: authUsers });
+          }
+
+          return await interaction.editReply(`🎉 成功授權 <@${targetUser.id}> 借用您的單一角色【**${targetIgn}**】！\n對方的 \`/角色狀態 儀表板\` 選單中已可直接查看與登記該角色！`);
         }
 
         if (subCommand === '撤銷') {
@@ -998,20 +990,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const targetIgn = interaction.options.getString('角色名稱').trim();
           const targetUser = interaction.options.getUser('對象成員');
 
-          const myProfile = await fetchUserDocSafe(interaction.user.id);
-          const isMyMain = myProfile.mainIgn?.toLowerCase() === targetIgn.toLowerCase();
-          const isMySub = myProfile.subs && myProfile.subs.some(s => s?.ign?.toLowerCase() === targetIgn.toLowerCase());
-          const isAdmin = isSuperAdmin(interaction.user.id, interaction.memberPermissions);
+          const statusDoc = await getCharStatusDoc(targetIgn);
+          if (!statusDoc) return interaction.editReply(`❌ 找不到角色【**${targetIgn}**】！`);
 
-          if (!isMyMain && !isMySub && !isAdmin) {
-            return interaction.editReply(`❌ 您不是角色【**${targetIgn}**】的所有權人，無法進行撤銷操作！`);
-          }
+          const isOwner = statusDoc.owners?.includes(interaction.user.id) || isSuperAdmin(interaction.user.id, interaction.memberPermissions);
+          if (!isOwner) return interaction.editReply(`❌ 您不是角色【**${targetIgn}**】的所有權人，無法進行撤銷操作！`);
 
-          let currentShared = myProfile.sharedUsers || [];
-          currentShared = currentShared.filter(uid => uid !== targetUser.id);
-          await db.collection('member_profiles').doc(interaction.user.id).update({ sharedUsers: currentShared });
+          let authUsers = statusDoc.authorizedUsers || [];
+          authUsers = authUsers.filter(uid => uid !== targetUser.id);
+          await db.collection('char_statuses').doc(targetIgn.toLowerCase()).update({ authorizedUsers: authUsers });
 
-          return await interaction.editReply(`🔒 已成功收回 <@${targetUser.id}> 對角色【**${targetIgn}**】的借用授權。`);
+          return await interaction.editReply(`🔒 已成功收回 <@${targetUser.id}> 對角色【**${targetIgn}**】的單一借用授權。`);
         }
       }
 
@@ -1943,351 +1932,4 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
         }
 
-        resultsText += '```';
-
-        const transfers = calculateMinTransfers(balances);
-        let transferGuide = `🧾 **【最少交易次數轉帳指引（共 ${transfers.length} 筆）】**\n\n`;
-
-        if (transfers.length === 0) {
-          transferGuide += `• 無需進行任何轉帳交易。`;
-        } else {
-          transfers.forEach((t, i) => {
-            transferGuide += `${i + 1}. ➡️ **${t.from}** 交易給 **${t.to}**：\`${formatMeso(t.amount)} 楓幣\``;
-            if (t.amount >= 10000000) transferGuide += ` *(💡 單筆達 1000w 以上，可協議拆單降手續費率)*`;
-            transferGuide += `\n`;
-          });
-        }
-
-        await db.collection('active_bets').doc(betId).update({ isSettled: true });
-
-        const settleEmbed = new EmbedBuilder()
-          .setColor(0xF1C40F)
-          .setTitle(`🎉【競猜結算公告】${betData.title}`)
-          .setDescription(`恭喜 **【${winOption.name}】** 成功開出！\n總獎金池 \`${formatMeso(totalPool)} 楓幣\` 已派發完畢！\n\n${resultsText}\n${transferGuide}`);
-
-        await interaction.editReply({ embeds: [settleEmbed] });
-
-        if (isBust) {
-          let pityText = `😭 **【暴死深切救濟清單】**\n${getRandomPity(betData.betType)}\n以下是好心人給你的同情救濟金，請自行找他們領取買藥：\n\n`;
-          let totalPity = 0;
-          if (donations.length > 0) {
-            donations.forEach(([uid, d], idx) => {
-              totalPity += d.amount;
-              pityText += `${idx + 1}. <@${uid}> (\`${d.ign}\`) 捐贈：\`${formatMeso(d.amount)} 楓幣\`\n`;
-            });
-            pityText += `\n💰 **總計收到救濟金**：\`${formatMeso(totalPity)} 楓幣\``;
-          } else {
-            pityText += `可惜... 這次沒有人留下救濟金，請堅強活下去！`;
-          }
-
-          try { await interaction.followUp({ content: pityText, ephemeral: true }); } catch (e) {}
-        }
-        return;
-      }
-
-      if (interaction.customId === 'select_query_job') {
-        await interaction.deferUpdate();
-        const embed = await generateJobEmbed(interaction.values[0]);
-        return await interaction.editReply({ embeds: [embed], components: [buildJobQueryMenu()] });
-      }
-
-      if (interaction.customId === 'select_job_register') {
-        const val = interaction.values[0];
-        const prevData = await fetchUserDocSafe(interaction.user.id);
-        if (val === 'RETIRED_OPTION') {
-          const modal = new ModalBuilder().setCustomId('modal_retire').setTitle('轉換身分：暫.退休');
-          modal.addComponents(new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('input_retire_ign').setLabel('遊戲名稱 / 暱稱').setStyle(TextInputStyle.Short)
-              .setValue(prevData.mainIgn || interaction.user.displayName || '').setRequired(false)
-          ));
-          return await interaction.showModal(modal);
-        }
-        userChoiceMap.set(interaction.user.id, val);
-        return await interaction.showModal(createRegisterModal(val, prevData));
-      }
-    }
-
-    // ----------------------------------------
-    // [D] Modal 表單提交
-    // ----------------------------------------
-    if (interaction.isModalSubmit()) {
-      if (interaction.customId.startsWith('modal_char_online_')) {
-        await interaction.deferReply({ ephemeral: true });
-        const charIgn = interaction.customId.replace('modal_char_online_', '');
-        const durationStr = interaction.fields.getTextInputValue('input_use_duration').trim();
-
-        const targetEndMs = parseDeadline(durationStr) || (Date.now() + 3600000);
-        const durationMin = Math.max(5, Math.floor((targetEndMs - Date.now()) / 60000));
-
-        const prevDoc = await getCharStatusDoc(charIgn);
-        if (prevDoc?.isOnline) {
-          return interaction.editReply(`⚠️ 該角色剛好被 <@${prevDoc.currentUserId}> 搶先登記上線，請稍後再試！`);
-        }
-
-        const myProfile = await fetchUserDocSafe(interaction.user.id);
-        let isOwner = false;
-        if (myProfile.mainIgn?.toLowerCase() === charIgn.toLowerCase()) isOwner = true;
-        if (myProfile.subs && myProfile.subs.some(s => s?.ign?.toLowerCase() === charIgn.toLowerCase())) isOwner = true;
-        if (prevDoc?.owners?.includes(interaction.user.id)) isOwner = true;
-        if (isSuperAdmin(interaction.user.id, interaction.memberPermissions)) isOwner = true;
-
-        const currentOwners = prevDoc?.owners || [interaction.user.id];
-
-        const newStatus = {
-          charIgn,
-          isOnline: true,
-          currentUserId: interaction.user.id,
-          currentUserName: myProfile.mainIgn || interaction.user.displayName,
-          owners: currentOwners,
-          startTime: Date.now(),
-          expectedEndTime: targetEndMs,
-          lastOverdueNotice: 0
-        };
-
-        await db.collection('char_statuses').doc(charIgn.toLowerCase()).set(newStatus, { merge: true });
-
-        const embed = createCharStatusEmbed(charIgn, newStatus, isOwner ? '👑 所有權人' : '🤝 授權使用者');
-        const components = createCharStatusComponents(charIgn, newStatus, isOwner, true);
-
-        return await interaction.editReply({
-          content: `🟢 您已成功登記上線使用【**${charIgn}**】！預計使用 \`${durationMin} 分鐘\`。\n*(下線時請記得回來點擊「🔴 我已離線」釋放狀態！)*`,
-          embeds: [embed],
-          components
-        });
-      }
-
-      if (interaction.customId.startsWith('modal_char_knock_')) {
-        await interaction.deferReply({ ephemeral: true });
-        const charIgn = interaction.customId.replace('modal_char_knock_', '');
-        const rawMin = interaction.fields.getTextInputValue('input_knock_minutes').trim();
-        const minutes = parseInt(rawMin.replace(/[^0-9]/g, '')) || 15;
-
-        if (minutes < 10) {
-          return interaction.editReply('❌ 預約換手時間最低限制為 10 分鐘，請給予當前使用者足夠的換手緩衝時間！');
-        }
-
-        const statusDoc = await getCharStatusDoc(charIgn);
-        if (!statusDoc?.isOnline) {
-          return interaction.editReply(`💡 角色【**${charIgn}**】目前剛好處於閒置中，您可以直接登記上線！`);
-        }
-
-        const myProfile = await fetchUserDocSafe(interaction.user.id);
-        const isOwner = statusDoc.owners?.includes(interaction.user.id) || isSuperAdmin(interaction.user.id, interaction.memberPermissions);
-        const knockerRole = isOwner ? '👑 所有權人' : '🤝 夥伴';
-
-        const targetUserObj = await client.users.fetch(statusDoc.currentUserId).catch(() => null);
-        let dmSuccess = false;
-
-        if (targetUserObj) {
-          const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`char_act_offline_${charIgn}`).setLabel('🔴 我已下線 / 立即釋放').setStyle(ButtonStyle.Success)
-          );
-
-          try {
-            await targetUserObj.send({
-              content: `🔔 **【共用帳號敲門提醒】**\n${knockerRole} <@${interaction.user.id}>（\`${myProfile.mainIgn || interaction.user.displayName}\`）詢問您是否還在線上？\n他預計在 **\`${minutes} 分鐘後\`** 需要使用角色【**${charIgn}**】，請留意換手準備！`,
-              components: [row]
-            });
-            dmSuccess = true;
-          } catch (e) {}
-        }
-
-        if (dmSuccess) {
-          return await interaction.editReply(`✅ 已成功透過私訊敲門提醒目前使用者 <@${statusDoc.currentUserId}>！請於 \`${minutes} 分鐘後\` 再前來確認。`);
-        } else {
-          return await interaction.editReply(`⚠️ 敲門已記錄，但使用者 <@${statusDoc.currentUserId}> 關閉了 Discord 私訊功能，建議直接在伺服器頻道中 @ 他聯繫！`);
-        }
-      }
-
-      if (interaction.customId.startsWith('modal_party_buffs_')) {
-        await interaction.deferReply({ ephemeral: true });
-        const partyId = interaction.customId.replace('modal_party_buffs_', '');
-
-        const partyDoc = await db.collection('party_trainings').doc(partyId).get();
-        if (!partyDoc.exists) return interaction.editReply('❌ 該揪團已失效。');
-        const partyData = partyDoc.data();
-
-        const rawCharInfo = interaction.fields.getTextInputValue('input_char_info');
-        const parts = rawCharInfo.split(/[/\\|\s,，_-]+/).map(s => s.trim()).filter(Boolean);
-        const ign = parts[0] || interaction.user.displayName;
-        const job = parts[1] || '冒險家';
-        const level = parts[2] || '120';
-
-        const mapleBuff = interaction.fields.getTextInputValue('input_maple_buff')?.trim() || '滿';
-        const extraDevice = interaction.fields.getTextInputValue('input_extra_device')?.trim() || '';
-        const buffs = { '楓祝': mapleBuff };
-
-        const definedBuffs = JOB_BUFFS[job] || [];
-        if (definedBuffs.length > 0) {
-          try {
-            const b1 = interaction.fields.getTextInputValue('input_job_buff_1')?.trim();
-            if (b1) buffs[definedBuffs[0]] = b1;
-          } catch (e) {}
-        }
-        if (definedBuffs.length > 1) {
-          try {
-            const b2 = interaction.fields.getTextInputValue('input_job_buff_2')?.trim();
-            if (b2) buffs[definedBuffs[1]] = b2;
-          } catch (e) {}
-        }
-
-        const members = (partyData.members || []).filter(m => !(m.userId === interaction.user.id && m.ign === ign));
-        members.push({ userId: interaction.user.id, ign, job, level, buffs, extraDevice });
-
-        await db.collection('party_trainings').doc(partyId).update({ members });
-        await updatePartyMainMessage(partyData, members, partyData.isClosed);
-
-        return await interaction.editReply(`🎉 成功加入【${partyData.target}】隊伍！\n角色：\`${ign}\` (${job} Lv.${level})\nBuff：\`${Object.entries(buffs).map(([k, v]) => `${k}:${v}`).join(', ')}\`${extraDevice ? `\n自帶支援：\`${extraDevice}\`` : ''}`);
-      }
-
-      if (interaction.customId.startsWith('modal_pity_donate_')) {
-        await interaction.deferReply({ ephemeral: true });
-        const betId = interaction.customId.replace('modal_pity_donate_', '');
-        const donateAmount = parseMoneyInput(interaction.fields.getTextInputValue('input_pity_amount').trim());
-
-        if (donateAmount <= 0) return interaction.editReply('❌ 金額無效，未登記抖內。');
-
-        const betDoc = await db.collection('active_bets').doc(betId).get();
-        if (!betDoc.exists) return interaction.editReply('❌ 賭局已失效');
-        const betData = betDoc.data();
-
-        if (betData.isPaused || Date.now() >= betData.deadline) return interaction.editReply('🛑 該賭局目前不接受下注/抖內！');
-
-        const userDoc = await fetchUserDocSafe(interaction.user.id);
-        const playerIgn = userDoc.mainIgn || interaction.user.displayName || interaction.user.username;
-
-        const pityDonations = betData.pityDonations || {};
-        pityDonations[interaction.user.id] = { ign: playerIgn, amount: donateAmount };
-
-        await db.collection('active_bets').doc(betId).update({ pityDonations });
-        return await interaction.editReply(`🩹 已成功登記同情救濟 \`${formatMeso(donateAmount)} 楓幣\`！\n*(若最終暴死，系統會公開乾爹乾媽名冊，並私密通知苦主領取)*`);
-      }
-
-      if (interaction.customId.startsWith('modal_bet_custom_')) {
-        await interaction.deferReply({ ephemeral: true });
-        const betId = interaction.customId.replace('modal_bet_custom_', '');
-        const rawAmount = interaction.fields.getTextInputValue('input_bet_amount').trim();
-
-        const betDoc = await db.collection('active_bets').doc(betId).get();
-        if (!betDoc.exists) return interaction.editReply('❌ 賭局已失效');
-        const betData = betDoc.data();
-
-        if (betData.isPaused || Date.now() >= betData.deadline) return interaction.editReply('🛑 該賭局目前不接受下注！');
-
-        let optIdx;
-        if (betData.options.length > 3 || betData.isScroll) {
-          optIdx = userChoiceMap.get(`bet_choice_${interaction.user.id}_${betId}`);
-        } else {
-          optIdx = parseInt(interaction.fields.getTextInputValue('input_bet_choice')?.trim()) - 1;
-        }
-
-        const betAmount = parseMoneyInput(rawAmount);
-        if (betAmount <= 0) return interaction.editReply('❌ 下注金額格式無效！');
-        if (isNaN(optIdx) || optIdx < 0 || optIdx >= betData.options.length) return interaction.editReply(`❌ 選項無效，請重新選擇！`);
-
-        const userDoc = await fetchUserDocSafe(interaction.user.id);
-        const playerIgn = userDoc.mainIgn || interaction.user.displayName || interaction.user.username;
-
-        const options = betData.options;
-        const currentBet = options[optIdx].bets[interaction.user.id]?.amount || 0;
-        options[optIdx].bets[interaction.user.id] = { ign: playerIgn, amount: currentBet + betAmount };
-        options[optIdx].pool = (options[optIdx].pool || 0) + betAmount;
-
-        await db.collection('active_bets').doc(betId).update({ options });
-        return await interaction.editReply(`✅ 成功為 **${options[optIdx].name}** 下注 \`${formatMeso(betAmount)} 楓幣\`！(個人累計: ${formatMeso(currentBet + betAmount)})`);
-      }
-
-      if (interaction.customId === 'modal_register_page1') {
-        await interaction.deferReply();
-        const mainIgn = interaction.fields.getTextInputValue('input_main_ign').trim();
-        const mainLevel = interaction.fields.getTextInputValue('input_main_level').replace(/[^0-9]/g, '') || '1';
-        const playtime = interaction.fields.getTextInputValue('input_playtime').trim();
-        const mainJob = userChoiceMap.get(interaction.user.id) || '未知職業';
-        const newNick = `[${mainLevel}_${mainJob}] ${mainIgn}`.substring(0, 32);
-
-        const subLines1_2 = interaction.fields.getTextInputValue('input_subs_1_2').split('\n');
-        const subLines3_4 = interaction.fields.getTextInputValue('input_subs_3_4').split('\n');
-        const subsPage1 = [...subLines1_2, ...subLines3_4].map(parseSubCharacter).filter(Boolean);
-
-        const prevData = await fetchUserDocSafe(interaction.user.id);
-        const fullSubs = [...subsPage1, ...(prevData.subs ? prevData.subs.slice(4) : [])].slice(0, 10);
-
-        let reach199At = prevData.reach199At || null;
-        if (mainLevel === '199' && prevData.mainLevel !== '199') reach199At = admin.firestore.FieldValue.serverTimestamp();
-        else if (mainLevel !== '199') reach199At = null;
-
-        if (db) {
-          await db.collection('member_profiles').doc(interaction.user.id).set({
-            userId: interaction.user.id, username: interaction.user.username,
-            mainIgn, mainJob, mainLevel, playtime, subs: fullSubs, isRetired: false,
-            reach199At, timestamp: admin.firestore.FieldValue.serverTimestamp()
-          }).catch(() => {});
-        }
-
-        const rolesToAdd = new Set([ROLES.VERIFIED]);
-        const jobNames = [];
-        if (ROLES.JOBS[mainJob]) { rolesToAdd.add(ROLES.JOBS[mainJob]); jobNames.push(mainJob); }
-        fullSubs.forEach(s => {
-          if (s && ROLES.JOBS[s.job]) {
-            rolesToAdd.add(ROLES.JOBS[s.job]);
-            if (!jobNames.includes(s.job)) jobNames.push(s.job);
-          }
-        });
-        if (parseInt(mainLevel) >= 200) rolesToAdd.add(ROLES.WARDEN_200);
-
-        try {
-          const member = await interaction.guild.members.fetch(interaction.user.id);
-          const allJobIds = Object.values(ROLES.JOBS);
-          const oldRoles = member.roles.cache.filter(r => allJobIds.includes(r.id) || r.id === ROLES.UNVERIFIED || r.id === ROLES.RETIRED);
-          if (oldRoles.size) await member.roles.remove(oldRoles);
-          await member.roles.add(Array.from(rolesToAdd));
-          await member.setNickname(newNick).catch(() => {});
-        } catch (e) {}
-
-        const embed = new EmbedBuilder()
-          .setColor(parseInt(mainLevel) >= 200 ? 0xF1C40F : 0x57F287)
-          .setTitle(parseInt(mainLevel) >= 200 ? '👑 傳奇登頂！Lv 200 典獄長名冊已更新！' : '🎉 冒險家名冊已成功更新！')
-          .addFields(
-            { name: '👑 本尊角色', value: `\`${mainIgn}\` (${mainJob} / Lv.${mainLevel})`, inline: true },
-            { name: '⏱️ 遊玩時間', value: playtime, inline: true },
-            { name: `⚔️ 分身名單 (${fullSubs.length} 隻)`, value: fullSubs.map(s => `• \`${s.ign}\` (${s.job} Lv.${s.level})`).join('\n') || '無', inline: false },
-            { name: '🏷️ 伺服器暱稱', value: `\`${newNick}\``, inline: true },
-            { name: '✨ 身分組', value: `【已驗證】、 【${jobNames.join('】、 【')}】`, inline: true }
-          );
-
-        await interaction.editReply({ embeds: [embed] });
-        userChoiceMap.delete(interaction.user.id);
-      }
-
-      if (interaction.customId === 'modal_retire') {
-        await interaction.deferReply();
-        const ign = interaction.fields.getTextInputValue('input_retire_ign')?.trim() || interaction.user.displayName || interaction.user.username;
-        const newNick = `[退休] ${ign}`.substring(0, 32);
-
-        if (db) {
-          await db.collection('member_profiles').doc(interaction.user.id).set({
-            userId: interaction.user.id, username: interaction.user.username,
-            mainIgn: ign, isRetired: true, timestamp: admin.firestore.FieldValue.serverTimestamp()
-          }, { merge: true }).catch(() => {});
-        }
-
-        try {
-          const member = await interaction.guild.members.fetch(interaction.user.id);
-          const allJobIds = Object.values(ROLES.JOBS);
-          const oldJobs = member.roles.cache.filter(r => allJobIds.includes(r.id) || r.id === ROLES.UNVERIFIED || r.id === ROLES.WARDEN_200);
-          if (oldJobs.size) await member.roles.remove(oldJobs);
-          await member.roles.add([ROLES.VERIFIED, ROLES.RETIRED]);
-          await member.setNickname(newNick).catch(() => {});
-        } catch (e) {}
-
-        const embed = new EmbedBuilder().setColor(0x95A5A6).setTitle('💤 已切換為【暫.退休】')
-          .setDescription(`已為 <@${interaction.user.id}> 卸下所有職業身分組並賦予【暫.退休】。`);
-        return await interaction.editReply({ embeds: [embed] });
-      }
-    }
-  } catch (err) {
-    console.error('互動處理錯誤:', err);
-  }
-});
-
-client.login(process.env.DISCORD_TOKEN);
+        resultsText += '

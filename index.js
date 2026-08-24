@@ -659,10 +659,26 @@ try {
 } catch (e) { console.error('❌ Firebase Error:', e.message); }
 
 // ==========================================
-// 9. 斜線指令樹註冊 (簡化主選單 + 統一 /查看)
+// 9. 斜線指令樹註冊 (含 /角色狀態 授權/撤銷)
 // ==========================================
 const commands = [
-  new SlashCommandBuilder().setName('角色狀態').setDescription('查看與切換共用/借用角色的上線與在線狀態 (私密)'),
+  // 角色狀態（儀表板 / 授權 / 撤銷）
+  new SlashCommandBuilder()
+    .setName('角色狀態')
+    .setDescription('共用帳號管理 (儀表板 / 一鍵授權 / 撤銷)')
+    .addSubcommand(sub => sub.setName('儀表板').setDescription('查看與切換共用/借用角色的上線與在線狀態 (私密)'))
+    .addSubcommand(sub =>
+      sub.setName('授權')
+        .setDescription('授權指定成員借用您的角色')
+        .addStringOption(o => o.setName('角色名稱').setDescription('填寫您要授權借出的角色ID (例: 拿錢來)').setRequired(true))
+        .addUserOption(o => o.setName('對象成員').setDescription('選擇要授權借用的成員 (@小明)').setRequired(true))
+    )
+    .addSubcommand(sub =>
+      sub.setName('撤銷')
+        .setDescription('收回指定成員對您角色的借用權限')
+        .addStringOption(o => o.setName('角色名稱').setDescription('填寫您要收回借出的角色ID').setRequired(true))
+        .addUserOption(o => o.setName('對象成員').setDescription('選擇要撤銷借用權限的成員 (@小明)').setRequired(true))
+    ),
 
   new SlashCommandBuilder()
     .setName('放圖')
@@ -672,7 +688,6 @@ const commands = [
     .addStringOption(o => o.setName('預計多久離開').setDescription('例如：10分鐘後、21:30、半小時後').setRequired(true))
     .addStringOption(o => o.setName('備註說明').setDescription('例如：有死角Bug、需自備祈禱 (選填)').setRequired(false)),
 
-  // 1. /揪團 主指令 (發起)
   new SlashCommandBuilder()
     .setName('揪團')
     .setDescription('社群組隊揪團發起 (團練 / 突襲 / 組隊任務)')
@@ -704,7 +719,6 @@ const commands = [
         .addStringOption(o => o.setName('綁定職業').setDescription('例如：缺法師傳送、缺飛俠瞬移 (選填)').setRequired(false))
     ),
 
-  // 2. /賭局 主指令 (發起)
   new SlashCommandBuilder()
     .setName('賭局')
     .setDescription('社群競猜賭局系統 (技能書 / 衝卷 / 打寶)')
@@ -738,7 +752,6 @@ const commands = [
         .addStringOption(o => o.setName('底池金額').setDescription('加碼底池 (選填，例如：500w、1000w)').setRequired(false))
     ),
 
-  // 3. /查看 統一查詢中心
   new SlashCommandBuilder()
     .setName('查看')
     .setDescription('統一查詢中心 (查看進行中團練、突襲、組隊任務、全部揪團或賭局)')
@@ -897,52 +910,109 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isChatInputCommand()) {
       const { commandName } = interaction;
 
-      // 1. /角色狀態
+      // 1. /角色狀態 (儀表板 / 授權 / 撤銷)
       if (commandName === '角色狀態') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
-        await interaction.deferReply({ ephemeral: true });
+        const subCommand = interaction.options.getSubcommand();
 
-        const myProfile = await fetchUserDocSafe(interaction.user.id);
-        const myChars = [];
+        if (subCommand === '儀表板') {
+          await interaction.deferReply({ ephemeral: true });
 
-        if (myProfile.mainIgn) myChars.push({ ign: myProfile.mainIgn, job: myProfile.mainJob, isOwner: true });
-        if (myProfile.subs && Array.isArray(myProfile.subs)) {
-          myProfile.subs.forEach(s => {
-            if (s?.ign) myChars.push({ ign: s.ign, job: s.job, isOwner: true });
+          const myProfile = await fetchUserDocSafe(interaction.user.id);
+          const myChars = [];
+
+          if (myProfile.mainIgn) myChars.push({ ign: myProfile.mainIgn, job: myProfile.mainJob, isOwner: true });
+          if (myProfile.subs && Array.isArray(myProfile.subs)) {
+            myProfile.subs.forEach(s => {
+              if (s?.ign) myChars.push({ ign: s.ign, job: s.job, isOwner: true });
+            });
+          }
+
+          const allProfilesSnap = await db.collection('member_profiles').get();
+          allProfilesSnap.forEach(doc => {
+            const d = doc.data();
+            if (d.userId !== interaction.user.id) {
+              if (d.sharedUsers && Array.isArray(d.sharedUsers) && d.sharedUsers.includes(interaction.user.id)) {
+                if (d.mainIgn && !myChars.some(c => c.ign.toLowerCase() === d.mainIgn.toLowerCase())) {
+                  myChars.push({ ign: d.mainIgn, job: d.mainJob, isOwner: false });
+                }
+              }
+            }
+          });
+
+          if (myChars.length === 0) {
+            return interaction.editReply('📜 您尚未在 `/報到` 中登記角色，或尚未獲得任何角色的借用授權。');
+          }
+
+          const options = myChars.map(c =>
+            new StringSelectMenuOptionBuilder()
+              .setLabel(`${c.isOwner ? '👑' : '🤝'} ${c.ign} (${c.job})`.substring(0, 100))
+              .setValue(`char_select_${c.ign}`)
+              .setDescription(`${c.isOwner ? '擁有者角色' : '已授權借用角色'}`)
+          );
+
+          const row = new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder().setCustomId('select_char_status_dashboard').setPlaceholder('🔽 請點此選擇要查看狀態的角色').addOptions(options.slice(0, 25))
+          );
+
+          return await interaction.editReply({
+            content: '👉 **請在下方選單選擇角色，即可查看即時在線/借用狀態：**',
+            components: [row]
           });
         }
 
-        const allProfilesSnap = await db.collection('member_profiles').get();
-        allProfilesSnap.forEach(doc => {
-          const d = doc.data();
-          if (d.userId !== interaction.user.id) {
-            if (d.sharedUsers && Array.isArray(d.sharedUsers) && d.sharedUsers.includes(interaction.user.id)) {
-              if (d.mainIgn && !myChars.some(c => c.ign.toLowerCase() === d.mainIgn.toLowerCase())) {
-                myChars.push({ ign: d.mainIgn, job: d.mainJob, isOwner: false });
-              }
-            }
-          }
-        });
+        if (subCommand === '授權') {
+          await interaction.deferReply({ ephemeral: true });
+          const targetIgn = interaction.options.getString('角色名稱').trim();
+          const targetUser = interaction.options.getUser('對象成員');
 
-        if (myChars.length === 0) {
-          return interaction.editReply('📜 您尚未在 `/報到` 中登記角色，或尚未獲得任何角色的借用授權。');
+          const myProfile = await fetchUserDocSafe(interaction.user.id);
+          const isMyMain = myProfile.mainIgn?.toLowerCase() === targetIgn.toLowerCase();
+          const isMySub = myProfile.subs && myProfile.subs.some(s => s?.ign?.toLowerCase() === targetIgn.toLowerCase());
+          const isAdmin = isSuperAdmin(interaction.user.id, interaction.memberPermissions);
+
+          if (!isMyMain && !isMySub && !isAdmin) {
+            return interaction.editReply(`❌ 您不是角色【**${targetIgn}**】的所有權人，無法進行授權操作！`);
+          }
+
+          const currentShared = myProfile.sharedUsers || [];
+          if (!currentShared.includes(targetUser.id)) {
+            currentShared.push(targetUser.id);
+            await db.collection('member_profiles').doc(interaction.user.id).update({ sharedUsers: currentShared });
+          }
+
+          const statusDoc = await getCharStatusDoc(targetIgn);
+          const owners = statusDoc?.owners || [interaction.user.id];
+          if (!owners.includes(interaction.user.id)) owners.push(interaction.user.id);
+
+          await db.collection('char_statuses').doc(targetIgn.toLowerCase()).set({
+            charIgn: targetIgn,
+            owners
+          }, { merge: true });
+
+          return await interaction.editReply(`🎉 成功授權 <@${targetUser.id}> 借用您的角色【**${targetIgn}**】！\n對方的 \`/角色狀態 儀表板\` 選單中已可直接查看與登記該角色！`);
         }
 
-        const options = myChars.map(c =>
-          new StringSelectMenuOptionBuilder()
-            .setLabel(`${c.isOwner ? '👑' : '🤝'} ${c.ign} (${c.job})`.substring(0, 100))
-            .setValue(`char_select_${c.ign}`)
-            .setDescription(`${c.isOwner ? '擁有者角色' : '已授權借用角色'}`)
-        );
+        if (subCommand === '撤銷') {
+          await interaction.deferReply({ ephemeral: true });
+          const targetIgn = interaction.options.getString('角色名稱').trim();
+          const targetUser = interaction.options.getUser('對象成員');
 
-        const row = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder().setCustomId('select_char_status_dashboard').setPlaceholder('🔽 請點此選擇要查看狀態的角色').addOptions(options.slice(0, 25))
-        );
+          const myProfile = await fetchUserDocSafe(interaction.user.id);
+          const isMyMain = myProfile.mainIgn?.toLowerCase() === targetIgn.toLowerCase();
+          const isMySub = myProfile.subs && myProfile.subs.some(s => s?.ign?.toLowerCase() === targetIgn.toLowerCase());
+          const isAdmin = isSuperAdmin(interaction.user.id, interaction.memberPermissions);
 
-        return await interaction.editReply({
-          content: '👉 **請在下方選單選擇角色，即可查看即時在線/借用狀態：**',
-          components: [row]
-        });
+          if (!isMyMain && !isMySub && !isAdmin) {
+            return interaction.editReply(`❌ 您不是角色【**${targetIgn}**】的所有權人，無法進行撤銷操作！`);
+          }
+
+          let currentShared = myProfile.sharedUsers || [];
+          currentShared = currentShared.filter(uid => uid !== targetUser.id);
+          await db.collection('member_profiles').doc(interaction.user.id).update({ sharedUsers: currentShared });
+
+          return await interaction.editReply(`🔒 已成功收回 <@${targetUser.id}> 對角色【**${targetIgn}**】的借用授權。`);
+        }
       }
 
       // 2. /放圖
@@ -1174,7 +1244,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const viewType = interaction.options.getString('類別');
         await interaction.deferReply();
 
-        // [A] 查看賭局
         if (viewType === 'VIEW_BET') {
           const activeBetDoc = await getActiveBetDoc();
           if (!activeBetDoc) return interaction.editReply('🎲 目前沒有進行中的賭局，輸入 `/賭局` 來開一盤吧！');
@@ -1185,7 +1254,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
         }
 
-        // [B] 查看揪團類別 (團練 / 突襲 / 組隊任務 / 全部)
         const snap = await db.collection('party_trainings').where('isClosed', '==', false).get();
         if (snap.empty) return interaction.editReply('📜 目前沒有進行招募中的隊伍，使用 `/揪團` 發起一個吧！');
 
@@ -1565,7 +1633,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (customId === 'btn_quick_edit') {
         const prevData = await fetchUserDocSafe(interaction.user.id);
-        const defaultJob = prevData.mainJob || Object.keys(ROLES.JOBS)[0];
+        const defaultJob = Object.keys(ROLES.JOBS)[0];
         userChoiceMap.set(interaction.user.id, defaultJob);
         return await interaction.showModal(createRegisterModal(defaultJob, prevData));
       }

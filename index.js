@@ -166,7 +166,7 @@ async function getActiveBetDoc() {
 }
 
 // ==========================================
-// 4. UI 模組建構 (自動帶入舊資料)
+// 4. UI 模組建構
 // ==========================================
 function buildWizardConfigCard(userId) {
   const session = wizardSessionMap.get(userId);
@@ -551,17 +551,18 @@ const commands = [
     .setDescription('抽取今日幸運頻道')
     .addIntegerOption(o => o.setName('最大頻道').setDescription('最大頻道數').setRequired(true).setMinValue(1)),
 
-  // 9. 管理員專屬指令 (透過 Administrator 權限限制，一般成員不可見)
+  // 9. 管理員專屬指令 (僅管理員可見)
   new SlashCommandBuilder()
     .setName('管理員功能')
-    .setDescription('【超級管理員專用】代填/代更新成員名冊與特權管理')
+    .setDescription('【超級管理員專用】管理手冊、代填/代更新名冊與全服特權')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addStringOption(o => o.setName('模式').setDescription('選擇管理操作').setRequired(true)
       .addChoices(
+        { name: '📖 說明手冊 (help) - 檢視目前所有管理員功能清單', value: 'ADMIN_HELP' },
         { name: '📝 代填/代更新成員名冊', value: 'ADMIN_PROXY_REGISTER' }
       )
     )
-    .addUserOption(o => o.setName('對象成員').setDescription('選擇要代為登記/編輯的 Discord 成員').setRequired(true))
+    .addUserOption(o => o.setName('對象成員').setDescription('代填名冊時選擇對象成員 (@成員)').setRequired(false))
 ].map(c => c.toJSON());
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
@@ -570,13 +571,20 @@ client.once(Events.ClientReady, async () => {
   console.log(`✅ Bot 上線：${client.user.tag}`);
   try {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    
+    // 立即向機器人加入的所有伺服器註冊 (秒速刷新客戶端選單)
+    for (const guild of client.guilds.cache.values()) {
+      await rest.put(
+        Routes.applicationGuildCommands(client.user.id, guild.id),
+        { body: commands }
+      );
+      console.log(`✅ 已為伺服器 [${guild.name}] 即時註冊指令清單！`);
+    }
   } catch (e) { console.error('❌ 指令註冊失敗:', e); }
 
   // -------------------------------------------------------------
   // 背景自動化排程 (Cron Schedule)
   // -------------------------------------------------------------
-  // 1. 每月 1 號 08:00 稽核
   cron.schedule('0 0 8 1 * *', async () => {
     if (!db) return;
     try {
@@ -597,7 +605,6 @@ client.once(Events.ClientReady, async () => {
     } catch (e) { console.error('每月稽核異常:', e.message); }
   }, { timezone: 'Asia/Taipei' });
 
-  // 2. 廣播一：每週一 09:00 提醒突襲王
   cron.schedule('0 0 9 * * 1', async () => {
     try {
       const ch = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
@@ -605,13 +612,12 @@ client.once(Events.ClientReady, async () => {
         const embed = new EmbedBuilder()
           .setColor(0xE74C3C)
           .setTitle('🔔【每週例行提醒】突襲遠征結算倒數')
-          .setDescription('週二即將進行維護/重置，請各位冒險家把握時間打完突襲王！');
+          .setDescription('週二即將進行維護/重置，請把握時間打完突襲王！');
         await ch.send({ embeds: [embed] });
       }
     } catch (e) { console.error('週一廣播異常:', e.message); }
   }, { timezone: 'Asia/Taipei' });
 
-  // 3. 廣播二：每週二 09:00 與 19:00 推播名冊維護
   const sendTuesdayBroadcast = async () => {
     try {
       const ch = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
@@ -662,37 +668,70 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.reply({ embeds: [embed], components: [row] });
       }
 
-      // 2. /管理員功能 (代填/代更新名冊)
+      // 2. /管理員功能 (含 /help 說明手冊與代填)
       if (commandName === '管理員功能') {
         if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) return interaction.reply({ content: '❌ 僅超級管理員可使用！', ephemeral: true });
-        const targetUser = interaction.options.getUser('對象成員');
-        const prev = await fetchUserDocSafe(targetUser.id);
+        const mode = interaction.options.getString('模式');
 
-        wizardSessionMap.set(interaction.user.id, {
-          userId: interaction.user.id,
-          targetUserId: targetUser.id,
-          step: 'MAIN',
-          playtime: prev.playtime || '未填',
-          joinReason: prev.joinReason || '管理員代填',
-          main: {
-            ign: prev.mainIgn || '',
-            job: prev.mainJob || '黑騎士',
-            level: prev.mainLevel || '120',
-            owners: prev.owners || [targetUser.id],
-            authorizedUsers: prev.authorizedUsers || []
-          },
-          subs: prev.subs || [],
-          currentSub: null
-        });
+        // [Help 說明手冊]
+        if (mode === 'ADMIN_HELP') {
+          const helpEmbed = new EmbedBuilder()
+            .setColor(0xF1C40F)
+            .setTitle('📖【超級管理員功能與特權手冊】')
+            .setDescription(
+              `👑 **最高管理者特權** (ID: \`${SUPER_ADMIN_ID}\`)\n` +
+              `無論系統重啟或更新，您均享有全服 100% 繞過身分檢查與即時覆蓋控制權。\n━━━━━━━━━━━━━━━━━━━━\n` +
+              `**🛠️ 目前已實裝之管理員功能清單：**\n\n` +
+              `1. 📝 **代填/代更新名冊 (\`/管理員功能 模式:代填名冊\`)\n` +
+              `   └ 可指定任何成員，自動帶出舊資料為其建檔或修改本尊/分身。\n\n` +
+              `2. 🌐 **全服授權矩陣控制台 (\`/角色狀態 功能:全服總覽\`)\n` +
+              `   └ 一鍵檢視全伺服器所有角色關係，並可直接下拉重設共同所有權人與借用人。\n\n` +
+              `3. ⚡ **強制重置/收回角色 (\`/角色狀態 儀表板\`)\n` +
+              `   └ 巡檢全服在線角色，可無視擁有者限制直接一鍵將佔用角色釋放為閒置。\n\n` +
+              `4. 🚪 **強制關閉任何揪團 (\`/揪團\` 面板)\n` +
+              `   └ 隊長失聯或任務結束時，管理員可強制鎖定關閉招募。\n\n` +
+              `5. ⚖️ **無條件結算與廢除賭局 (\`/賭局\` 面板)\n` +
+              `   └ 可提前結算派彩、生成轉帳清單，或一鍵刪除無效賭局。\n\n` +
+              `6. 🤝 **地圖交接管理 (\`/放圖\` 面板)\n` +
+              `   └ 可強制取消未履約的預約者，或一鍵將地圖完成交接結案。`
+            )
+            .setFooter({ text: '管理員專屬私密手冊 | 即時同步最新版本特權' });
 
-        const modal = new ModalBuilder().setCustomId('modal_wizard_step1_main').setTitle(`代填【${targetUser.username}】本尊資料`);
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_ign').setLabel('本尊遊戲 ID (必填)').setValue(prev.mainIgn || '').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_level').setLabel('本尊等級 (必填)').setValue(prev.mainLevel || '120').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_playtime').setLabel('遊玩時間 (選填)').setValue(prev.playtime || '').setStyle(TextInputStyle.Short).setRequired(false)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_join_reason').setLabel('加入原因 / 備註 (選填)').setValue(prev.joinReason || '管理員代填').setStyle(TextInputStyle.Paragraph).setRequired(false))
-        );
-        return await interaction.showModal(modal);
+          return await interaction.reply({ embeds: [helpEmbed], ephemeral: true });
+        }
+
+        // [代填名冊]
+        if (mode === 'ADMIN_PROXY_REGISTER') {
+          const targetUser = interaction.options.getUser('對象成員');
+          if (!targetUser) return interaction.reply({ content: '❌ 請選擇要代為登記的成員！', ephemeral: true });
+
+          const prev = await fetchUserDocSafe(targetUser.id);
+          wizardSessionMap.set(interaction.user.id, {
+            userId: interaction.user.id,
+            targetUserId: targetUser.id,
+            step: 'MAIN',
+            playtime: prev.playtime || '未填',
+            joinReason: prev.joinReason || '管理員代填',
+            main: {
+              ign: prev.mainIgn || '',
+              job: prev.mainJob || '黑騎士',
+              level: prev.mainLevel || '120',
+              owners: prev.owners || [targetUser.id],
+              authorizedUsers: prev.authorizedUsers || []
+            },
+            subs: prev.subs || [],
+            currentSub: null
+          });
+
+          const modal = new ModalBuilder().setCustomId('modal_wizard_step1_main').setTitle(`代填【${targetUser.username}】本尊資料`);
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_ign').setLabel('本尊遊戲 ID (必填)').setValue(prev.mainIgn || '').setStyle(TextInputStyle.Short).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_level').setLabel('本尊等級 (必填)').setValue(prev.mainLevel || '120').setStyle(TextInputStyle.Short).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_playtime').setLabel('遊玩時間 (選填)').setValue(prev.playtime || '').setStyle(TextInputStyle.Short).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_join_reason').setLabel('加入原因 / 備註 (選填)').setValue(prev.joinReason || '管理員代填').setStyle(TextInputStyle.Paragraph).setRequired(false))
+          );
+          return await interaction.showModal(modal);
+        }
       }
 
       // 3. /角色狀態
@@ -1241,6 +1280,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`✅ 成功為 **${d.options[optIdx].name}** 下注 \`+100 萬 楓幣\`！`);
       }
 
+      // 自訂下注 Modal (含貼心選項標籤提示)
       if (customId.startsWith('bet_custom_btn_')) {
         const bId = customId.replace('bet_custom_btn_', '');
         const doc = await db.collection('active_bets').doc(bId).get();
@@ -1256,6 +1296,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(modal);
       }
 
+      // 同情抖內 Modal (含搞笑文案隨機提示)
       if (customId.startsWith('bet_pity_donate_')) {
         const bId = customId.replace('bet_pity_donate_', '');
         const randomQuote = getRandomPityQuote();

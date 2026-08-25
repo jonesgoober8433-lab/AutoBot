@@ -28,7 +28,7 @@ const ROLES = {
   VERIFIED: '1540053101120323685',
   UNVERIFIED: '1540053110846791762',
   RETIRED: '1540327837947396166',
-  WARDEN_200: '1540337376994402376',
+  WARDEN_200: '1540337376994402376', // 尊榮的 Lv 200_典獄長[cite: 1]
   JOBS: {
     '黑騎士': '1540050432796266526', '聖騎士': '1540051178396844153', '英雄': '1540051228459929631',
     '箭神': '1540051260005154967', '神射手': '1540051322525716601', '冰雷': '1540051347376832594',
@@ -159,8 +159,11 @@ function calculateMinTransfers(balances) {
 async function fetchUserDocSafe(userId) {
   if (!db) return {};
   try {
-    const doc = await db.collection('member_profiles').doc(userId).get();
-    return doc.exists ? doc.data() : {};
+    const doc = await Promise.race([
+      db.collection('member_profiles').doc(userId).get(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 2000))
+    ]);
+    return doc?.exists ? doc.data() : {};
   } catch { return {}; }
 }
 
@@ -800,7 +803,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
 });
 
 // ==========================================
-// 6. 核心互動監聽
+// 6. 核心互動監聽 (具備全域防崩潰 Try-Catch)
 // ==========================================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
@@ -1210,7 +1213,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         userChoiceMap.set(`target_mod_user_${interaction.user.id}`, interaction.user.id);
         const selectOptions = chars.slice(0, 25).map((c, i) =>
-          new StringSelectMenuOptionBuilder().setLabel(`${c.isMain ? '👑 本尊' : '⚔️ 分身'}：${c.ign} (${c.job} Lv.${c.lv})`).setValue(`lvl_update_${i}_${c.ign}`)
+          new StringSelectMenuOptionBuilder().setLabel(`${c.isMain ? '👑 本尊' : '⚔️ 分身'}：${c.ign} (${c.job} Lv.${c.lv})`.substring(0, 100)).setValue(`lvl_update_${interaction.user.id}_${i}_${c.ign}`)
         );
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder().setCustomId('select_char_to_update_level').setPlaceholder('🔽 請選擇要更新等級的角色').addOptions(selectOptions)
@@ -1227,7 +1230,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         userChoiceMap.set(`target_del_user_${interaction.user.id}`, interaction.user.id);
         const selectOptions = chars.slice(0, 25).map(c =>
-          new StringSelectMenuOptionBuilder().setLabel(`🗑️ 刪除：${c.ign} (${c.job} Lv.${c.lv})`).setValue(`del_char_${c.idx}_${c.ign}`)
+          new StringSelectMenuOptionBuilder().setLabel(`🗑️ 刪除：${c.ign} (${c.job} Lv.${c.lv})`.substring(0, 100)).setValue(`del_char_${interaction.user.id}_${c.idx}_${c.ign}`)
         );
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder().setCustomId('select_char_to_delete').setPlaceholder('⚠️ 請選擇欲刪除的分身角色').addOptions(selectOptions)
@@ -1700,7 +1703,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!chars.length) return interaction.followUp({ content: '❌ 該成員尚未登記任何角色！', ephemeral: true });
 
         const selectOptions = chars.slice(0, 25).map((c, i) =>
-          new StringSelectMenuOptionBuilder().setLabel(`${c.isMain ? '👑 本尊' : '⚔️ 分身'}：${c.ign} (${c.job} Lv.${c.lv})`).setValue(`lvl_update_${targetUid}_${i}_${c.ign}`)
+          new StringSelectMenuOptionBuilder().setLabel(`${c.isMain ? '👑 本尊' : '⚔️ 分身'}：${c.ign} (${c.job} Lv.${c.lv})`.substring(0, 100)).setValue(`lvl_update_${targetUid}_${i}_${c.ign}`)
         );
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder().setCustomId('select_char_to_update_level').setPlaceholder('🔽 請選擇要更新等級的角色').addOptions(selectOptions)
@@ -1718,7 +1721,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!chars.length) return interaction.followUp({ content: '💡 該成員沒有可刪除的分身角色！', ephemeral: true });
 
         const selectOptions = chars.slice(0, 25).map(c =>
-          new StringSelectMenuOptionBuilder().setLabel(`🗑️ 刪除：${c.ign} (${c.job} Lv.${c.lv})`).setValue(`del_char_${targetUid}_${c.idx}_${c.ign}`)
+          new StringSelectMenuOptionBuilder().setLabel(`🗑️ 刪除：${c.ign} (${c.job} Lv.${c.lv})`.substring(0, 100)).setValue(`del_char_${targetUid}_${c.idx}_${c.ign}`)
         );
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder().setCustomId('select_char_to_delete').setPlaceholder('⚠️ 請選擇欲刪除的分身角色').addOptions(selectOptions)
@@ -1733,7 +1736,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         let charIdx = 0;
         let ign = '';
 
-        if (parts.length >= 4) {
+        if (parts.length >= 5) {
           targetUid = parts[2];
           charIdx = parseInt(parts[3]);
           ign = parts.slice(4).join('_');
@@ -1759,7 +1762,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         let charIdx = 0;
         let ign = '';
 
-        if (parts.length >= 4) {
+        if (parts.length >= 5) {
           targetUid = parts[2];
           charIdx = parseInt(parts[3]);
           ign = parts.slice(4).join('_');
@@ -1877,7 +1880,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const charIgn = userChoiceMap.get(`temp_matrix_char_${interaction.user.id}`);
         if (!charIgn) return await interaction.editReply('❌ 操作逾時！');
         await db.collection('char_statuses').doc(charIgn.toLowerCase()).update({ owners: interaction.values });
-        return await interaction.editReply(`✅ 已成功重設【**${charIgn}**】的共同所有權人為：${interaction.values.map(u => `<@${u}>`).join(', ')}`);
+        return await interaction.editReply({ content: `✅ 已成功重設【**${charIgn}**】的共同所有權人為：${interaction.values.map(u => `<@${u}>`).join(', ')}`, components: [] });
       }
 
       if (customId === 'select_matrix_set_auths') {
@@ -1885,7 +1888,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const charIgn = userChoiceMap.get(`temp_matrix_char_${interaction.user.id}`);
         if (!charIgn) return await interaction.editReply('❌ 操作逾時！');
         await db.collection('char_statuses').doc(charIgn.toLowerCase()).update({ authorizedUsers: interaction.values });
-        return await interaction.editReply(`✅ 已成功重設【**${charIgn}**】的授權借用人為：${interaction.values.map(u => `<@${u}>`).join(', ') || '無'}`);
+        return await interaction.editReply({ content: `✅ 已成功重設【**${charIgn}**】的授權借用人為：${interaction.values.map(u => `<@${u}>`).join(', ') || '無'}`, components: [] });
       }
 
       if (customId === 'select_party_to_join') {
@@ -2380,7 +2383,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
     }
   } catch (err) {
-    console.error('處理互動時發生錯誤:', err);
+    console.error('互動處理錯誤:', err);
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({ content: '❌ 處理超時或發生異常，請重試！' }).catch(() => {});
+      } else {
+        await interaction.reply({ content: '❌ 處理失敗，請重試！', ephemeral: true }).catch(() => {});
+      }
+    } catch {}
   }
 });
 

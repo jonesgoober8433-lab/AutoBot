@@ -1200,45 +1200,44 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (customId === 'card_btn_update_level') {
-        await interaction.deferReply({ ephemeral: true });
         const profile = await fetchUserDocSafe(interaction.user.id);
         const chars = [];
         if (profile.mainIgn) chars.push({ ign: profile.mainIgn, job: profile.mainJob, lv: profile.mainLevel, isMain: true });
         (profile.subs || []).forEach(s => chars.push({ ign: s.ign, job: s.job, lv: s.level, isMain: false }));
 
-        if (!chars.length) return interaction.editReply('❌ 您尚未登記任何角色！');
+        if (!chars.length) return interaction.reply({ content: '❌ 您尚未登記任何角色！', ephemeral: true });
 
         userChoiceMap.set(`target_mod_user_${interaction.user.id}`, interaction.user.id);
         const selectOptions = chars.slice(0, 25).map(c =>
-          new StringSelectMenuOptionBuilder().setLabel(`${c.isMain ? '👑 本尊' : '⚔️ 分身'}：${c.ign} (${c.job} Lv.${c.lv})`).setValue(`lvl_update_${c.ign}`)
+          new StringSelectMenuOptionBuilder().setLabel(`${c.isMain ? '👑 本尊' : '⚔️ 分身'}：${c.ign} (${c.job} Lv.${c.lv})`).setValue(`lvl_update_${interaction.user.id}_${c.ign}`)
         );
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder().setCustomId('select_char_to_update_level').setPlaceholder('🔽 請選擇要更新等級的角色').addOptions(selectOptions)
         );
-        return await interaction.editReply({ content: '👉 **請選擇要升級/調整等級的角色：**', components: [row] });
+        return await interaction.reply({ content: '👉 **請選擇要升級/調整等級的角色：**', components: [row], ephemeral: true });
       }
 
       if (customId === 'card_btn_delete_char') {
-        await interaction.deferReply({ ephemeral: true });
         const profile = await fetchUserDocSafe(interaction.user.id);
         const chars = (profile.subs || []).map((s, i) => ({ ign: s.ign, job: s.job, lv: s.level, idx: i }));
 
-        if (!chars.length) return interaction.editReply('💡 您目前沒有可刪除的分身角色 (本尊無法直接刪除，請重新報到覆蓋)！');
+        if (!chars.length) return interaction.reply({ content: '💡 您目前沒有可刪除的分身角色 (本尊無法直接刪除，請重新報到覆蓋)！', ephemeral: true });
 
         userChoiceMap.set(`target_del_user_${interaction.user.id}`, interaction.user.id);
         const selectOptions = chars.slice(0, 25).map(c =>
-          new StringSelectMenuOptionBuilder().setLabel(`🗑️ 刪除：${c.ign} (${c.job} Lv.${c.lv})`).setValue(`del_char_${c.ign}`)
+          new StringSelectMenuOptionBuilder().setLabel(`🗑️ 刪除：${c.ign} (${c.job} Lv.${c.lv})`).setValue(`del_char_${interaction.user.id}_${c.ign}`)
         );
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder().setCustomId('select_char_to_delete').setPlaceholder('⚠️ 請選擇欲刪除的分身角色').addOptions(selectOptions)
         );
-        return await interaction.editReply({ content: '👉 **請選擇要從名冊中刪除的分身角色：**', components: [row] });
+        return await interaction.reply({ content: '👉 **請選擇要從名冊中刪除的分身角色：**', components: [row], ephemeral: true });
       }
 
       if (customId.startsWith('btn_confirm_delete_char_')) {
         await interaction.deferReply({ ephemeral: true });
-        const ign = customId.replace('btn_confirm_delete_char_', '');
-        const targetUid = userChoiceMap.get(`target_del_user_${interaction.user.id}`) || interaction.user.id;
+        const parts = customId.split('_');
+        const targetUid = parts[4];
+        const ign = parts.slice(5).join('_');
         const profile = await fetchUserDocSafe(targetUid);
 
         const newSubs = (profile.subs || []).filter(s => s.ign.toLowerCase() !== ign.toLowerCase());
@@ -1246,7 +1245,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await db.collection('char_statuses').doc(ign.toLowerCase()).delete().catch(() => {});
 
         await syncMemberRoles(interaction.guild, targetUid, { ...profile, subs: newSubs });
-        userChoiceMap.delete(`target_del_user_${interaction.user.id}`);
         return await interaction.editReply(`🗑️ 角色【**${ign}**】已成功自名冊與資料庫中徹底刪除，無效身分組已同步清理！`);
       }
 
@@ -1669,11 +1667,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isStringSelectMenu() || interaction.isUserSelectMenu()) {
       const customId = interaction.customId;
 
-      // 管理員名冊代操作第一步：選擇成員
       if (customId === 'admin_select_user_to_add_char') {
         const targetUid = interaction.values[0];
         userChoiceMap.set(`target_add_user_${interaction.user.id}`, targetUid);
-        const modal = new ModalBuilder().setCustomId('modal_card_add_char').setTitle(`代添角色 (<@${targetUid}>)`);
+        const modal = new ModalBuilder().setCustomId('modal_card_add_char').setTitle(`代添角色`);
         modal.addComponents(
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('add_char_ign').setLabel('角色遊戲 ID (必填)').setStyle(TextInputStyle.Short).setRequired(true)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('add_char_job').setLabel('職業 (例如: 黑騎士、主教、夜使者)').setStyle(TextInputStyle.Short).setRequired(true)),
@@ -1683,7 +1680,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (customId === 'admin_select_user_to_update_lvl') {
-        await interaction.deferUpdate();
         const targetUid = interaction.values[0];
         userChoiceMap.set(`target_mod_user_${interaction.user.id}`, targetUid);
         const profile = await fetchUserDocSafe(targetUid);
@@ -1691,38 +1687,41 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (profile.mainIgn) chars.push({ ign: profile.mainIgn, job: profile.mainJob, lv: profile.mainLevel, isMain: true });
         (profile.subs || []).forEach(s => chars.push({ ign: s.ign, job: s.job, lv: s.level, isMain: false }));
 
-        if (!chars.length) return interaction.followUp({ content: '❌ 該成員尚未登記任何角色！', ephemeral: true });
+        if (!chars.length) return interaction.reply({ content: '❌ 該成員尚未登記任何角色！', ephemeral: true });
 
         const selectOptions = chars.slice(0, 25).map(c =>
-          new StringSelectMenuOptionBuilder().setLabel(`${c.isMain ? '👑 本尊' : '⚔️ 分身'}：${c.ign} (${c.job} Lv.${c.lv})`).setValue(`lvl_update_${c.ign}`)
+          new StringSelectMenuOptionBuilder().setLabel(`${c.isMain ? '👑 本尊' : '⚔️ 分身'}：${c.ign} (${c.job} Lv.${c.lv})`).setValue(`lvl_update_${targetUid}_${c.ign}`)
         );
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder().setCustomId('select_char_to_update_level').setPlaceholder('🔽 請選擇要更新等級的角色').addOptions(selectOptions)
         );
-        return await interaction.followUp({ content: `👉 **【代更等級】已選定成員 <@${targetUid}>，請選擇其名下角色：**`, components: [row], ephemeral: true });
+        return await interaction.reply({ content: `👉 **【代更等級】已選定成員 <@${targetUid}>，請選擇其名下角色：**`, components: [row], ephemeral: true });
       }
 
       if (customId === 'admin_select_user_to_delete_char') {
-        await interaction.deferUpdate();
         const targetUid = interaction.values[0];
         userChoiceMap.set(`target_del_user_${interaction.user.id}`, targetUid);
         const profile = await fetchUserDocSafe(targetUid);
         const chars = (profile.subs || []).map((s, i) => ({ ign: s.ign, job: s.job, lv: s.level, idx: i }));
 
-        if (!chars.length) return interaction.followUp({ content: '💡 該成員沒有可刪除的分身角色！', ephemeral: true });
+        if (!chars.length) return interaction.reply({ content: '💡 該成員沒有可刪除的分身角色！', ephemeral: true });
 
         const selectOptions = chars.slice(0, 25).map(c =>
-          new StringSelectMenuOptionBuilder().setLabel(`🗑️ 刪除：${c.ign} (${c.job} Lv.${c.lv})`).setValue(`del_char_${c.ign}`)
+          new StringSelectMenuOptionBuilder().setLabel(`🗑️ 刪除：${c.ign} (${c.job} Lv.${c.lv})`).setValue(`del_char_${targetUid}_${c.ign}`)
         );
         const row = new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder().setCustomId('select_char_to_delete').setPlaceholder('⚠️ 請選擇欲刪除的分身角色').addOptions(selectOptions)
         );
-        return await interaction.followUp({ content: `👉 **【代刪角色】已選定成員 <@${targetUid}>，請選擇要刪除的分身：**`, components: [row], ephemeral: true });
+        return await interaction.reply({ content: `👉 **【代刪角色】已選定成員 <@${targetUid}>，請選擇要刪除的分身：**`, components: [row], ephemeral: true });
       }
 
       if (customId === 'select_char_to_update_level') {
-        const ign = interaction.values[0].replace('lvl_update_', '');
-        const modal = new ModalBuilder().setCustomId(`modal_card_set_level_${ign}`).setTitle(`更新【${ign}】等級`);
+        const parts = interaction.values[0].split('_');
+        const targetUid = parts[2];
+        const ign = parts.slice(3).join('_');
+        userChoiceMap.set(`target_mod_user_${interaction.user.id}`, targetUid);
+
+        const modal = new ModalBuilder().setCustomId(`modal_card_set_level_${targetUid}_${ign}`).setTitle(`更新【${ign}】等級`);
         modal.addComponents(
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('new_level_input').setLabel('請輸入最新等級 (純數字)').setStyle(TextInputStyle.Short).setRequired(true))
         );
@@ -1730,13 +1729,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (customId === 'select_char_to_delete') {
-        const ign = interaction.values[0].replace('del_char_', '');
+        const parts = interaction.values[0].split('_');
+        const targetUid = parts[2];
+        const ign = parts.slice(3).join('_');
+        userChoiceMap.set(`target_del_user_${interaction.user.id}`, targetUid);
+
         const embedConfirm = new EmbedBuilder()
           .setColor(0xED4245)
           .setTitle(`⚠️ 刪除確認：【${ign}】`)
           .setDescription(`您確定要將分身角色【**${ign}**】從名冊與共用資料庫中徹底刪除嗎？\n刪除後對應的副職業身分組將一併清理！`);
         const rowConfirm = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`btn_confirm_delete_char_${ign}`).setLabel('🗑️ 確定刪除').setStyle(ButtonStyle.Danger)
+          new ButtonBuilder().setCustomId(`btn_confirm_delete_char_${targetUid}_${ign}`).setLabel('🗑️ 確定刪除').setStyle(ButtonStyle.Danger)
         );
         return await interaction.reply({ embeds: [embedConfirm], components: [rowConfirm], ephemeral: true });
       }
@@ -2021,9 +2024,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (customId.startsWith('modal_card_set_level_')) {
         await interaction.deferReply({ ephemeral: true });
-        const ign = customId.replace('modal_card_set_level_', '');
+        const parts = customId.replace('modal_card_set_level_', '').split('_');
+        const targetUid = parts[0];
+        const ign = parts.slice(1).join('_');
         const newLevel = interaction.fields.getTextInputValue('new_level_input').replace(/[^0-9]/g, '') || '1';
-        const targetUid = userChoiceMap.get(`target_mod_user_${interaction.user.id}`) || interaction.user.id;
         const profile = await fetchUserDocSafe(targetUid);
 
         let isMain = profile.mainIgn?.toLowerCase() === ign.toLowerCase();
@@ -2055,7 +2059,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (milestone) await interaction.followUp({ embeds: [milestone], ephemeral: true });
         }
 
-        userChoiceMap.delete(`target_mod_user_${interaction.user.id}`);
         return await interaction.editReply(`🆙 角色【**${ign}**】等級已成功更新為 **Lv.${newLevel}**！`);
       }
 

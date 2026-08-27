@@ -44,6 +44,7 @@ const JOB_BUFFS = {
   '刀賊': ['⚡速'], '拳霸': ['🥊最終極速'], '槍神': []
 };
 
+// 經典版 / Big Bang 前 1~200 等每級升級所需經驗值表 (v113 前原始倍率)
 const CLASSIC_EXP_TABLE = [
   0, 15, 34, 57, 92, 135, 372, 560, 840, 1242,
   1600, 2100, 2750, 3550, 4550, 5800, 7350, 9250, 11550, 14350,
@@ -225,6 +226,54 @@ async function getActiveBetDoc() {
 // ==========================================
 // 5. UI 模組建構
 // ==========================================
+async function buildBorrowDashboardEmbed() {
+  if (!db) return new EmbedBuilder().setColor(0xED4245).setDescription('❌ 資料庫未連線');
+  const snap = await db.collection('char_statuses').where('isOnline', '==', true).get();
+  const now = Date.now();
+
+  const embed = new EmbedBuilder()
+    .setColor(0x3498DB)
+    .setTitle('🔑【公用角色即時借用狀態公佈欄】')
+    .setFooter({ text: '角色共用防頂號中心 | 換手請隨手登記與釋放' });
+
+  if (snap.empty) {
+    embed.setDescription('🟢 **目前伺服器所有授權角色皆處於【閒置中】，具備權限者可直接點擊下方按鈕借用！**');
+    return embed;
+  }
+
+  let desc = '⚠️ **以下為目前伺服器【借用中 / 使用中】之角色名單：**\n━━━━━━━━━━━━━━━━━━━━\n';
+  snap.docs.forEach((doc, idx) => {
+    const d = doc.data();
+    const ign = d.charIgn || doc.id;
+    const job = d.job || '冒險家';
+    const usedMin = Math.floor((now - (d.startTime || now)) / 60000);
+    const expTime = d.expectedEndTime || now;
+    const isOverdue = now > expTime;
+    const overdueMin = Math.floor((now - expTime) / 60000);
+
+    const statusTag = isOverdue ? `🟡 **已逾時 ${overdueMin} 分鐘**` : `⏳ **預計釋放**：<t:${Math.floor(expTime / 1000)}:R>`;
+    const owners = (d.owners || []).map(u => `<@${u}>`).join(', ') || '號主未登記';
+
+    desc += `${idx + 1}. ⚔️ **${ign}** (${job})\n` +
+            `   └ 👤 **借用人**：<@${d.currentUserId}> (\`${d.currentUserName || '冒險家'}\`)\n` +
+            `   └ ⏱️ **已使用**：\`${usedMin} 分鐘\` ｜ ${statusTag}\n` +
+            `   └ 👑 **號主**：${owners}\n\n`;
+  });
+
+  embed.setDescription(desc.substring(0, 4000));
+  return embed;
+}
+
+function buildBorrowDashboardComponents() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('borrow_btn_take').setLabel('🔑 我要借角色 (登記上線)').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('borrow_btn_return').setLabel('🔴 我已離線 (釋放角色)').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('borrow_btn_force').setLabel('⚡ 號主/管理員強制收回').setStyle(ButtonStyle.Secondary)
+    )
+  ];
+}
+
 function createExpCalculatorEmbed(sessionData) {
   const isRunning = !!sessionData?.startTime;
   const lvText = sessionData?.startLevel ? `Lv.${sessionData.startLevel}` : '未設定';
@@ -358,19 +407,25 @@ function createMultiBetComponents(betId, options) {
 }
 
 // ==========================================
-// 6. 頂層指令註冊
+// 6. 頂層指令註冊 (Guild 秒速同步)
 // ==========================================
 const commands = [
   new SlashCommandBuilder()
-    .setName('距離200等')
-    .setDescription('經典版/Big Bang前楓之谷升級時間精算器 (計算至200等所需時間)')
+    .setName('升級試算')
+    .setDescription('經典版/Big Bang前楓之谷升級時間精算器 (自訂目標等級與每日目標)')
     .addIntegerOption(o => o.setName('目前等級').setDescription('您目前的角色等級 (1 ~ 199)').setRequired(true).setMinValue(1).setMaxValue(199))
+    .addIntegerOption(o => o.setName('目標等級').setDescription('想要升到的目標等級 (2 ~ 200)').setRequired(true).setMinValue(2).setMaxValue(200))
     .addStringOption(o => o.setName('目前經驗值').setDescription('目前累積經驗 (可輸入百分比如 35% 或 實際數字如 5000000)').setRequired(true))
-    .addStringOption(o => o.setName('十分鐘經驗值').setDescription('實測 10 分鐘獲得經驗 (可輸入如 120w、1200000)').setRequired(true)),
+    .addStringOption(o => o.setName('十分鐘經驗值').setDescription('實測 10 分鐘經驗 (例: 120w，可與每日目標二選一)').setRequired(false))
+    .addStringOption(o => o.setName('每日目標經驗').setDescription('每天預計打多少經驗值 (例: 2000w、1e)').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('角色狀態')
+    .setDescription('共用角色公佈欄 (查看被借出的角色、登記借用與釋放)'),
 
   new SlashCommandBuilder()
     .setName('經驗計算器')
-    .setDescription('測量練等經驗值與楓幣收益 (換算為標準 10 分鐘效率，支援跨等級升級計算)'),
+    .setDescription('測量練等經驗值與楓幣收益 (換算為標準 10 分鐘效率，支援升級精算)'),
 
   new SlashCommandBuilder()
     .setName('賭局')
@@ -437,18 +492,6 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
-    .setName('角色狀態')
-    .setDescription('共用帳號管理 (儀表板 / 授權 / 撤銷 / 全服總覽)')
-    .addStringOption(o => o.setName('功能').setDescription('選擇要執行的功能').setRequired(true)
-      .addChoices(
-        { name: '📊 角色狀態儀表板 (私密)', value: 'ACT_DASHBOARD' },
-        { name: '🤝 授權角色 (從名冊選角)', value: 'ACT_AUTH' },
-        { name: '🔒 撤銷借用 (從授權名單選角)', value: 'ACT_REVOKE' },
-        { name: '🌐 全服角色授權總覽 (管理員專用)', value: 'ACT_MATRIX' }
-      )
-    ),
-
-  new SlashCommandBuilder()
     .setName('個人名片')
     .setDescription('個人名片與公會成員名冊')
     .addStringOption(o => o.setName('模式').setDescription('選擇要檢視的模式').setRequired(true)
@@ -480,11 +523,77 @@ client.once(Events.ClientReady, async () => {
     for (const guild of client.guilds.cache.values()) {
       await rest.put(Routes.applicationGuildCommands(client.user.id, guild.id), { body: commands });
     }
+    console.log('✅ 指令註冊更新完成');
   } catch (e) { console.error('❌ 指令註冊失敗:', e); }
+
+  // 1. 每 15 分鐘定時檢查：賭局到期催促結算通知
+  cron.schedule('*/15 * * * *', async () => {
+    if (!db) return;
+    try {
+      const now = Date.now();
+      const snap = await db.collection('active_bets').where('isSettled', '==', false).get();
+      for (const doc of snap.docs) {
+        const d = doc.data();
+        if (now >= d.deadline) {
+          // 私訊通知發起人
+          const creator = await client.users.fetch(d.creatorId).catch(() => null);
+          if (creator) {
+            await creator.send(`🔔 **【賭局結算提醒】** 您發起的社群賭局 **【${d.title}】** 已到達截止時間，請盡速前往頻道點擊「⚖️ 結算」進行派彩！`).catch(() => {});
+          }
+          // 在開局頻道發送提醒
+          if (d.channelId) {
+            const ch = await client.channels.fetch(d.channelId).catch(() => null);
+            if (ch && ch.isTextBased()) {
+              await ch.send(`📢 **【賭局截止催促】** <@${d.creatorId}> 發起的賭局 **【${d.title}】** 已截止下注，請發起人或管理員盡速點擊下方「⚖️ 結算」按鈕派彩！`).catch(() => {});
+            }
+          }
+        }
+      }
+    } catch (e) { console.error('賭局催促排程異常:', e.message); }
+  });
+
+  // 2. 每小時巡檢：36小時自動放圖結案、24小時揪團自動關閉
+  cron.schedule('0 * * * *', async () => {
+    if (!db) return;
+    try {
+      const now = Date.now();
+      const mapSnap = await db.collection('map_shares').where('isFinished', '==', false).get();
+      for (const doc of mapSnap.docs) {
+        const d = doc.data();
+        const created = d.createdAt?.toMillis?.() || (now - 129600000);
+        if (now - created >= 129600000) {
+          await db.collection('map_shares').doc(doc.id).update({ isFinished: true });
+          if (d.channelId && d.messageId) {
+            const ch = await client.channels.fetch(d.channelId).catch(() => null);
+            if (ch) {
+              const m = await ch.messages.fetch(d.messageId).catch(() => null);
+              if (m) await m.edit({ embeds: [createMapShareEmbed({ ...d, isFinished: true })], components: [] }).catch(() => {});
+            }
+          }
+        }
+      }
+
+      const partySnap = await db.collection('party_trainings').where('isClosed', '==', false).get();
+      for (const doc of partySnap.docs) {
+        const d = doc.data();
+        const created = d.createdAt?.toMillis?.() || now;
+        if (now - created >= 86400000) {
+          await db.collection('party_trainings').doc(doc.id).update({ isClosed: true });
+          if (d.channelId && d.messageId) {
+            const ch = await client.channels.fetch(d.channelId).catch(() => null);
+            if (ch) {
+              const m = await ch.messages.fetch(d.messageId).catch(() => null);
+              if (m) await m.edit({ embeds: [createPartyEmbed({ ...d, isClosed: true })], components: createPartyComponents(doc.id, true) }).catch(() => {});
+            }
+          }
+        }
+      }
+    } catch (e) { console.error('自動巡檢異常:', e.message); }
+  });
 });
 
 // ==========================================
-// 7. 核心互動監聽 (全域 Try-Catch & 升級經驗精算)
+// 8. 核心互動監聽
 // ==========================================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
@@ -494,49 +603,73 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isChatInputCommand()) {
       const { commandName } = interaction;
 
-      // 1. /距離200等
-      if (commandName === '距離200等') {
+      // 1. /升級試算 (雙模式精算)
+      if (commandName === '升級試算') {
         await interaction.deferReply();
         const curLevel = interaction.options.getInteger('目前等級');
+        const targetLevel = interaction.options.getInteger('目標等級');
         const rawCurExp = interaction.options.getString('目前經驗值').trim();
-        const raw10MinExp = interaction.options.getString('十分鐘經驗值').trim();
+        const raw10MinExp = interaction.options.getString('十分鐘經驗值')?.trim();
+        const rawDailyGoal = interaction.options.getString('每日目標經驗')?.trim();
+
+        if (targetLevel <= curLevel) {
+          return interaction.editReply('❌ 目標等級必須大於目前等級！');
+        }
 
         const curLevelNeedExp = CLASSIC_EXP_TABLE[curLevel] || 1;
         const currentExpNum = parseExpInput(rawCurExp, curLevel);
-        const exp10Min = parseMoneyInput(raw10MinExp);
-        if (exp10Min <= 0) return interaction.editReply('❌ 10分鐘經驗值必須大於 0！');
 
+        // 精算從目前進度到目標等級所需的總經驗值
         let remainingExp = Math.max(0, curLevelNeedExp - currentExpNum);
-        for (let lv = curLevel + 1; lv < 200; lv++) {
+        for (let lv = curLevel + 1; lv < targetLevel; lv++) {
           remainingExp += (CLASSIC_EXP_TABLE[lv] || 0);
         }
 
-        const expPerHour = exp10Min * 6;
-        const totalHoursNeeded = (remainingExp / expPerHour);
-        const totalDaysNeeded = (totalHoursNeeded / 24).toFixed(1);
+        let efficiencyReport = '';
+        if (raw10MinExp) {
+          const exp10Min = parseMoneyInput(raw10MinExp);
+          if (exp10Min > 0) {
+            const expPerHour = exp10Min * 6;
+            const hoursNeeded = (remainingExp / expPerHour);
+            const days24h = (hoursNeeded / 24).toFixed(1);
+            efficiencyReport += `⚡ **實測效率**：\`+${exp10Min.toLocaleString()} EXP / 10分\` (\`+${expPerHour.toLocaleString()} EXP / 小時\`)\n` +
+                                `⏱️ **不斷線總需時間**：\`${hoursNeeded.toFixed(1)} 小時\` (約 \`${days24h} 天\`)\n` +
+                                `📅 **休閒換算**：每天練 2 小時約需 \`${(hoursNeeded / 2).toFixed(0)} 天\` ｜ 每天 4 小時約需 \`${(hoursNeeded / 4).toFixed(0)} 天\`\n`;
+          }
+        }
+
+        let dailyGoalReport = '';
+        if (rawDailyGoal) {
+          const dailyExp = parseMoneyInput(rawDailyGoal);
+          if (dailyExp > 0) {
+            const daysNeeded = Math.ceil(remainingExp / dailyExp);
+            dailyGoalReport += `🎯 **每日目標產出**：\`+${dailyExp.toLocaleString()} EXP / 天\`\n` +
+                               `📆 **預計達成天數**：約需 \`${daysNeeded} 天\` 即可升至 Lv.${targetLevel}！\n`;
+          }
+        }
 
         const embed = new EmbedBuilder()
           .setColor(0xF1C40F)
-          .setTitle(`⏳【經典版 / 原始倍率】距離 200 等巔峰精算報告`)
+          .setTitle(`⏳【經典版 / 原始倍率】Lv.${curLevel} ➔ Lv.${targetLevel} 升級精算報告`)
           .setDescription(
             `👤 **冒險家**：<@${interaction.user.id}>\n` +
             `📊 **目前進度**：\`Lv.${curLevel} (${((currentExpNum / curLevelNeedExp) * 100).toFixed(2)}%)\`\n` +
-            `⚡ **目前效率**：\`+${exp10Min.toLocaleString()} EXP / 10分\` (\`+${expPerHour.toLocaleString()} EXP / 小時\`)\n` +
+            `🎯 **升到 Lv.${targetLevel} 還需總經驗**：\`${remainingExp.toLocaleString()} EXP\`\n` +
             `━━━━━━━━━━━━━━━━━━━━\n` +
-            `🎯 **距離 200 等還需總經驗**：\`${remainingExp.toLocaleString()} EXP\`\n` +
-            `⏱️ **預估還需修煉時間**：\`${totalHoursNeeded.toFixed(1)} 小時\` (約 \`${totalDaysNeeded} 天\` 不斷線)\n` +
+            (efficiencyReport || dailyGoalReport ? `${efficiencyReport}${dailyGoalReport}` : `💡 *您可於指令中選填「十分鐘經驗值」或「每日目標經驗」進行時間推算！*\n`) +
             `━━━━━━━━━━━━━━━━━━━━\n` +
-            `💡 *本試算遵循 Big Bang 改版前 v113 原始經典倍率經驗公式，祝您早日登頂典獄長！*`
+            `💡 *本試算遵循 Big Bang 改版前 v113 原始經典倍率經驗公式，祝您早日達標！*`
           )
           .setFooter({ text: '楓之谷經典經驗精算庫' });
 
         return await interaction.editReply({ embeds: [embed] });
       }
 
-      // 2. /經驗計算器
-      if (commandName === '經驗計算器') {
-        const session = expTrackerMap.get(interaction.user.id);
-        return await interaction.reply({ embeds: [createExpCalculatorEmbed(session)], components: createExpCalculatorComponents(!!session?.startTime), ephemeral: true });
+      // 2. /角色狀態 (全新極簡公佈欄)
+      if (commandName === '角色狀態') {
+        await interaction.deferReply();
+        const embed = await buildBorrowDashboardEmbed();
+        return await interaction.editReply({ embeds: [embed], components: buildBorrowDashboardComponents() });
       }
 
       // 3. /賭局
@@ -616,7 +749,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const snap = await db.collection('party_trainings').where('isClosed', '==', false).get();
           if (snap.empty) return interaction.editReply('📜 目前沒有招募中的隊伍。');
 
-          await interaction.editReply(`⚔️ **【進行中揪團總覽】（共 ${snap.size} 團進行中，可直接在下方操作加入或管理）**`);
+          await interaction.editReply(`⚔️ **【進行中揪團總覽】（共 ${snap.size} 團進行中）**`);
           for (const doc of snap.docs) {
             const d = doc.data();
             await interaction.followUp({ embeds: [createPartyEmbed(d)], components: createPartyComponents(doc.id, d.isClosed) });
@@ -668,7 +801,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
           id: mapRef.id, creatorId: interaction.user.id, mapName, channelNum, leaveTime, note,
           takerId: null, isFinished: false, createdAt: admin.firestore.FieldValue.serverTimestamp()
         };
-        const msg = await interaction.editReply({ embeds: [createMapShareEmbed(mapData)], components: [
+        const msg = await interaction.editReply({ embeds: [
+          new EmbedBuilder().setColor(0x57F287).setTitle(`🗺️【熱門地圖交接/放圖】${mapName}`).setDescription(`👑 放圖者: <@${interaction.user.id}>\n📍 頻道: \`第 ${channelNum} 頻道\`\n⏳ 預計離開: \`${leaveTime}\`\n備註: \`${note}\``)
+        ], components: [
           new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`map_take_${mapRef.id}`).setLabel('✋ 我要圖 (立即預約)').setStyle(ButtonStyle.Success),
             new ButtonBuilder().setCustomId(`map_done_${mapRef.id}`).setLabel('🤝 已交接完成').setStyle(ButtonStyle.Primary)
@@ -689,11 +824,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ embeds: [embed] });
       }
 
-      // 8. /角色報到
-      if (commandName === '角色報到') {
-        const embed = new EmbedBuilder().setColor(0x57F287).setTitle('📝 冒險家報到 / 名冊更新').setDescription('歡迎來到伺服器！請點擊下方按鈕進行 **多頁精靈報到與角色獨立登記**！');
-        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('btn_trigger_wizard_main').setLabel('📝 填寫表單').setStyle(ButtonStyle.Success));
-        return await interaction.reply({ embeds: [embed], components: [row] });
+      // 8. /經驗計算器
+      if (commandName === '經驗計算器') {
+        const session = expTrackerMap.get(interaction.user.id);
+        return await interaction.reply({ embeds: [createExpCalculatorEmbed(session)], components: createExpCalculatorComponents(!!session?.startTime), ephemeral: true });
       }
     }
 
@@ -703,11 +837,91 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton()) {
       const customId = interaction.customId;
 
-      // 經驗計算器：開始彈窗 (新增起始等級輸入)
+      // 1. 角色借用看板：我要借角色
+      if (customId === 'borrow_btn_take') {
+        await interaction.deferReply({ ephemeral: true });
+        const snap = await db.collection('char_statuses').where('isOnline', '==', false).get();
+        const availableChars = [];
+
+        snap.docs.forEach(doc => {
+          const d = doc.data();
+          const ign = d.charIgn || doc.id;
+          const owners = d.owners || [];
+          const auths = d.authorizedUsers || [];
+          if (owners.includes(interaction.user.id) || auths.includes(interaction.user.id) || isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+            availableChars.push({ ign, job: d.job || '冒險家' });
+          }
+        });
+
+        if (!availableChars.length) {
+          return interaction.editReply('📜 目前沒有授權給您且處於【閒置中】的角色可供借用！');
+        }
+
+        const selectOptions = availableChars.slice(0, 25).map((c, i) =>
+          new StringSelectMenuOptionBuilder().setLabel(`🟢 借用：${c.ign} (${c.job})`).setValue(`take_char_${i}_${c.ign}`)
+        );
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder().setCustomId('select_char_to_borrow').setPlaceholder('🔽 請選擇你要借用的閒置角色').addOptions(selectOptions)
+        );
+        return await interaction.editReply({ content: '👉 **請選擇您要借用上線的角色：**', components: [row] });
+      }
+
+      // 2. 角色借用看板：我已離線 (釋放角色)
+      if (customId === 'borrow_btn_return') {
+        await interaction.deferReply({ ephemeral: true });
+        const snap = await db.collection('char_statuses').where('currentUserId', '==', interaction.user.id).where('isOnline', '==', true).get();
+
+        if (snap.empty) {
+          return interaction.editReply('💡 您目前沒有正在佔用中的角色！');
+        }
+
+        const selectOptions = snap.docs.slice(0, 25).map((doc, i) => {
+          const d = doc.data();
+          const ign = d.charIgn || doc.id;
+          return new StringSelectMenuOptionBuilder().setLabel(`🔴 釋放：${ign} (${d.job || '冒險家'})`).setValue(`return_char_${i}_${ign}`);
+        });
+
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder().setCustomId('select_char_to_return').setPlaceholder('🔽 請選擇你要釋放歸還的角色').addOptions(selectOptions)
+        );
+        return await interaction.editReply({ content: '👉 **請選擇您要下線並釋放的角色：**', components: [row] });
+      }
+
+      // 3. 角色借用看板：強制收回
+      if (customId === 'borrow_btn_force') {
+        await interaction.deferReply({ ephemeral: true });
+        const snap = await db.collection('char_statuses').where('isOnline', '==', true).get();
+        const forceList = [];
+
+        snap.docs.forEach(doc => {
+          const d = doc.data();
+          const ign = d.charIgn || doc.id;
+          const isOwner = (d.owners || []).includes(interaction.user.id);
+          const isManager = isSuperAdmin(interaction.user.id, interaction.memberPermissions);
+          if (isOwner || isManager) {
+            forceList.push({ ign, job: d.job || '冒險家', borrower: d.currentUserName || '夥伴' });
+          }
+        });
+
+        if (!forceList.length) {
+          return interaction.editReply('💡 目前沒有您名下且正在被他人借用中的角色！');
+        }
+
+        const selectOptions = forceList.slice(0, 25).map((c, i) =>
+          new StringSelectMenuOptionBuilder().setLabel(`⚡ 強制收回：${c.ign} (由 ${c.borrower} 借用中)`).setValue(`force_char_${i}_${c.ign}`)
+        );
+
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder().setCustomId('select_char_to_force_return').setPlaceholder('⚠️ 選擇要強制踢除下線的角色').addOptions(selectOptions)
+        );
+        return await interaction.editReply({ content: '👉 **請選擇要強制收回的角色：**', components: [row] });
+      }
+
+      // 經驗計算器：開始
       if (customId === 'exp_calc_trigger_start') {
         const modal = new ModalBuilder().setCustomId('modal_exp_calc_start').setTitle('開始計算 - 輸入起始數據');
         modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_start_level').setLabel('1. 起始等級 (必填，1 ~ 199)').setPlaceholder('例如：120').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_start_level').setLabel('1. 起始等級 (1 ~ 199)').setPlaceholder('例如：120').setStyle(TextInputStyle.Short).setRequired(true)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_exp_start').setLabel('2. 起始經驗值 (支援數字或 35%)').setPlaceholder('例如：12500000 或 35%').setStyle(TextInputStyle.Short).setRequired(true)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_meso_start').setLabel('3. 起始金幣 (選填)').setPlaceholder('例如：500w 或 5000000').setStyle(TextInputStyle.Short).setRequired(false))
         );
@@ -721,7 +935,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.update({ embeds: [embed], components: comps });
       }
 
-      // 經驗計算器：結束暫停計時並彈窗 (新增結束等級輸入)
       if (customId === 'exp_calc_stop') {
         const session = expTrackerMap.get(interaction.user.id);
         if (!session?.startTime) return interaction.reply({ content: '⚠️ 計時尚未開始，請先點擊開始！', ephemeral: true });
@@ -731,23 +944,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const modal = new ModalBuilder().setCustomId('modal_exp_calc_finish').setTitle('結束計算 - 輸入結束數據');
         modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_end_level').setLabel('1. 結束等級 (必填，若升級請填新等級)').setValue(`${session.startLevel || 120}`).setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_end_level').setLabel('1. 結束等級 (若升級請填新等級)').setValue(`${session.startLevel || 120}`).setStyle(TextInputStyle.Short).setRequired(true)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_exp_end').setLabel('2. 結束經驗值 (支援數字或 42%)').setPlaceholder('例如：13200000 或 42%').setStyle(TextInputStyle.Short).setRequired(true)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_meso_end').setLabel('3. 結束金幣 (選填)').setPlaceholder('例如：420w 或 4200000').setStyle(TextInputStyle.Short).setRequired(false))
-        );
-        return await interaction.showModal(modal);
-      }
-
-      if (customId === 'exp_calc_trigger_share') {
-        const report = expTrackerMap.get(`report_${interaction.user.id}`);
-        if (!report) return interaction.reply({ content: '❌ 報告已失效，請重新計算！', ephemeral: true });
-
-        const modal = new ModalBuilder().setCustomId('modal_exp_calc_share').setTitle('📢 分享效率報告至頻道');
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('share_map_name').setLabel('地圖名稱 (必填)').setPlaceholder('例如：忘卻6、蛋龍、主巢穴').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('share_job').setLabel('職業 (必填)').setPlaceholder('例如：黑騎士、主教、夜使者').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('share_level').setLabel('等級 (必填)').setValue(`${report.endLevel || report.startLevel || 120}`).setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('share_note').setLabel('備註說明 (選填)').setPlaceholder('例如：自帶祈禱機、單練、開雙倍').setStyle(TextInputStyle.Paragraph).setRequired(false))
         );
         return await interaction.showModal(modal);
       }
@@ -792,12 +991,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (Date.now() >= d.deadline) return interaction.reply({ content: '🛑 該賭局已截止下注！', ephemeral: true });
 
         const isStep = (d.betType === 'scroll_step');
-        let optHintList = '';
-        if (isStep) {
-          optHintList = d.options.map((o, idx) => `${idx}:${o.name}`).join(' | ');
-        } else {
-          optHintList = d.options.map((o, idx) => `${idx + 1}:${o.name}`).join(' | ');
-        }
+        let optHintList = isStep
+          ? d.options.map((o, idx) => `${idx}:${o.name}`).join(' | ')
+          : d.options.map((o, idx) => `${idx + 1}:${o.name}`).join(' | ');
 
         const modal = new ModalBuilder().setCustomId(`modal_bet_custom_${bId}`).setTitle('自訂下注金額 (最低 100 萬)');
         modal.addComponents(
@@ -850,12 +1046,53 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isStringSelectMenu() || interaction.isUserSelectMenu()) {
       const customId = interaction.customId;
 
+      // 選擇借用角色 -> 彈出借用時長彈窗
+      if (customId === 'select_char_to_borrow') {
+        const val = interaction.values[0];
+        const ign = val.split('_').slice(3).join('_');
+        userChoiceMap.set(`borrow_ign_${interaction.user.id}`, ign);
+
+        const modal = new ModalBuilder().setCustomId(`modal_borrow_char_${ign}`).setTitle(`登記借用 - 【${ign}】`);
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('borrow_duration').setLabel('預計借用時長 (例: 30m, 1h, 2h, 21:30)').setValue('1h').setStyle(TextInputStyle.Short).setRequired(true))
+        );
+        return await interaction.showModal(modal);
+      }
+
+      // 選擇釋放角色
+      if (customId === 'select_char_to_return') {
+        await interaction.deferReply({ ephemeral: true });
+        const val = interaction.values[0];
+        const ign = val.split('_').slice(3).join('_');
+
+        await db.collection('char_statuses').doc(ign.toLowerCase()).set({
+          isOnline: false, currentUserId: null, currentUserName: null, startTime: 0, expectedEndTime: 0
+        }, { merge: true });
+
+        return await interaction.editReply(`✅ 已成功釋放並歸還角色【**${ign}**】，目前狀態已轉為【🟢 閒置中】！`);
+      }
+
+      // 選擇強制收回角色
+      if (customId === 'select_char_to_force_return') {
+        await interaction.deferReply({ ephemeral: true });
+        const val = interaction.values[0];
+        const ign = val.split('_').slice(3).join('_');
+
+        await db.collection('char_statuses').doc(ign.toLowerCase()).set({
+          isOnline: false, currentUserId: null, currentUserName: null, startTime: 0, expectedEndTime: 0
+        }, { merge: true });
+
+        return await interaction.editReply(`⚡ 已強制收回角色【**${ign}**】，目前狀態已重置為【🟢 閒置中】！`);
+      }
+
+      // 賭局多選項下注選定
       if (customId.startsWith('bet_selopt_')) {
         const bId = customId.replace('bet_selopt_', '');
         userChoiceMap.set(`bet_choice_${interaction.user.id}_${bId}`, parseInt(interaction.values[0]));
         return await interaction.reply({ content: `👉 已選中第 ${parseInt(interaction.values[0]) + 1} 個選項，請點擊按鈕完成下注！`, ephemeral: true });
       }
 
+      // 賭局結算派彩
       if (customId.startsWith('settle_fin_')) {
         await interaction.deferReply();
         const bId = customId.replace('settle_fin_', '');
@@ -941,10 +1178,34 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------
-    // [D] Modal 提交 (升級計算自動累加)
+    // [D] Modal 提交
     // ----------------------------------------
     if (interaction.isModalSubmit()) {
       const customId = interaction.customId;
+
+      // 角色借用提交
+      if (customId.startsWith('modal_borrow_char_')) {
+        await interaction.deferReply({ ephemeral: true });
+        const ign = customId.replace('modal_borrow_char_', '');
+        const durationStr = interaction.fields.getTextInputValue('borrow_duration').trim();
+        const endMs = parseDeadline(durationStr) || (Date.now() + 3600000);
+
+        const prevDoc = await getCharStatusDoc(ign);
+        if (prevDoc?.isOnline) return interaction.editReply(`⚠️ 該角色剛被 <@${prevDoc.currentUserId}> 搶先登記上線！`);
+
+        const prev = await fetchUserDocSafe(interaction.user.id);
+        const newStatus = {
+          charIgn: ign,
+          isOnline: true,
+          currentUserId: interaction.user.id,
+          currentUserName: prev.mainIgn || interaction.user.displayName,
+          startTime: Date.now(),
+          expectedEndTime: endMs
+        };
+
+        await db.collection('char_statuses').doc(ign.toLowerCase()).set(newStatus, { merge: true });
+        return await interaction.editReply(`🟢 成功登記借用【**${ign}**】！預計使用至 <t:${Math.floor(endMs / 1000)}:T> (<t:${Math.floor(endMs / 1000)}:R>)，請記得在下線時釋放角色！`);
+      }
 
       // 經驗計算器：開始數據提交
       if (customId === 'modal_exp_calc_start') {
@@ -962,7 +1223,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.reply({ content: `✅ **已成功鎖定 Lv.${startLevel} 起始數據，計時開始！**`, embeds: [embed], components: comps, ephemeral: true });
       }
 
-      // 經驗計算器：結束數據提交 (跨等級經驗累積計算)
+      // 經驗計算器：結束數據提交 (跨等級升級累加)
       if (customId === 'modal_exp_calc_finish') {
         await interaction.deferReply({ ephemeral: true });
         const session = expTrackerMap.get(interaction.user.id);
@@ -976,7 +1237,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const rawExpEnd = interaction.fields.getTextInputValue('input_exp_end');
         const expEnd = parseExpInput(rawExpEnd, endLevel);
 
-        // 精算跨等級總獲得經驗
         let totalGainExp = 0;
         if (endLevel === session.startLevel) {
           totalGainExp = Math.max(0, expEnd - session.expStart);
@@ -1039,44 +1299,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ embeds: [reportEmbed], components: [rowShare] });
       }
 
-      // 經驗計算器：公開分享
-      if (customId === 'modal_exp_calc_share') {
-        const report = expTrackerMap.get(`report_${interaction.user.id}`);
-        if (!report) return interaction.reply({ content: '❌ 報告已失效，請重新計算！', ephemeral: true });
-
-        const mapName = interaction.fields.getTextInputValue('share_map_name').trim();
-        const job = interaction.fields.getTextInputValue('share_job').trim();
-        const level = interaction.fields.getTextInputValue('share_level').trim();
-        const note = interaction.fields.getTextInputValue('share_note')?.trim() || '無特殊備註';
-
-        let mesoReport = '';
-        if (report.hasMeso) {
-          const sign10 = report.mesoPer10Min >= 0 ? '🟢 淨賺' : '🔴 虧損';
-          mesoReport = `\n💰 **10分鐘楓幣收支**：${sign10} \`${formatMeso(Math.abs(report.mesoPer10Min))}\``;
-        }
-
-        const shareEmbed = new EmbedBuilder()
-          .setColor(0x3498DB)
-          .setTitle(`📢【練等效率分享】${mapName}`)
-          .setDescription(
-            `👤 **冒險家**：<@${interaction.user.id}>\n` +
-            `⚔️ **職業/等級**：\`${job} (Lv.${level})\`\n` +
-            `📍 **練等地點**：\`${mapName}\`\n` +
-            `⏱️ **實測時間**：\`${report.durationMinText}\`\n` +
-            `━━━━━━━━━━━━━━━━━━━━\n` +
-            `⚡ **標準 10 分鐘經驗**：\`+${report.expPer10Min.toLocaleString()} EXP\`\n` +
-            `🔥 **預估 1 小時經驗**：\`+${report.expPerHour.toLocaleString()} EXP\`` +
-            mesoReport + `\n` +
-            `━━━━━━━━━━━━━━━━━━━━\n` +
-            `📝 **備註說明**：\`${note}\``
-          )
-          .setFooter({ text: '社群效率分享庫 | 感謝分享' });
-
-        await interaction.channel.send({ embeds: [shareEmbed] });
-        return await interaction.reply({ content: '✅ 成功將效率報告分享至頻道！', ephemeral: true });
-      }
-
-      // 賭局自訂下注
+      // 賭局：自訂金額下注
       if (customId.startsWith('modal_bet_custom_')) {
         await interaction.deferReply({ ephemeral: true });
         const bId = customId.replace('modal_bet_custom_', '');
@@ -1119,7 +1342,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`✅ 成功為 **${d.options[optIdx].name}** 下注 \`${formatMeso(amt)} 楓幣\`！(累計下注: ${formatMeso(cur + amt)})`);
       }
 
-      // 同情抖內提交
+      // 賭局：同情抖內
       if (customId.startsWith('modal_pity_donate_')) {
         await interaction.deferReply({ ephemeral: true });
         const bId = customId.replace('modal_pity_donate_', '');

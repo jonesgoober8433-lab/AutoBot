@@ -275,7 +275,7 @@ function buildRegisterPanelEmbed() {
       `歡迎加入冒險公會！\n` +
       `點擊下方按鈕即可填寫您的 **本人綽號**、**本尊角色** 與 **多隻分身小號**。\n\n` +
       `✨ **系統亮點**：\n` +
-      `• 自動將暱稱同步更新為 \`綽號[等級_職業] 遊戲ID\`。\n` +
+      `• 自動將暱稱同步更新為 \`綽號[等級_職業]\`。\n` +
       `• 自動發放本尊與分身專屬職業身分組。\n` +
       `• 自動建立角色共用庫，方便夥伴登記借用與即時通知！`
     )
@@ -338,7 +338,7 @@ async function buildAllCharStatusEmbed() {
 
   const embed = new EmbedBuilder()
     .setColor(0x3498DB)
-    .setTitle('🔑【全服公用角色狀態看板】(依職業排序)')
+    .setTitle('🌐【全服公用角色狀態看板】(依職業排序)')
     .setDescription('✨ 全服角色公開借用！登記借用與歸還時，系統將**自動私訊通知號主**！\n━━━━━━━━━━━━━━━━━━━━');
 
   if (snap.empty) {
@@ -412,7 +412,7 @@ async function processBorrowCharacter(interaction, ign, durationStr) {
     charIgn: prevDoc.charIgn || ign,
     isOnline: true,
     currentUserId: interaction.user.id,
-    currentUserName: prev.mainIgn || interaction.user.displayName,
+    currentUserName: prev.nickname || prev.mainIgn || interaction.user.displayName,
     startTime: isExtension ? (prevDoc.startTime || Date.now()) : Date.now(),
     expectedEndTime: endMs
   };
@@ -425,7 +425,7 @@ async function processBorrowCharacter(interaction, ign, durationStr) {
       const ownerUser = await client.users.fetch(ownerUid).catch(() => null);
       if (ownerUser) {
         const actionTag = isExtension ? '延長借用時長' : '登記借用';
-        await ownerUser.send(`🔔 **【公用角色借用通知】** 冒險家 <@${interaction.user.id}>（\`${prev.mainIgn || interaction.user.displayName}\`）剛剛${actionTag}了您的角色【**${prevDoc.charIgn || ign}**】，預計使用至 <t:${Math.floor(endMs / 1000)}:T> (<t:${Math.floor(endMs / 1000)}:R>)！`).catch(() => {});
+        await ownerUser.send(`🔔 **【公用角色借用通知】** 冒險家 <@${interaction.user.id}>（\`${prev.nickname || prev.mainIgn || interaction.user.displayName}\`）剛剛${actionTag}了您的角色【**${prevDoc.charIgn || ign}**】，預計使用至 <t:${Math.floor(endMs / 1000)}:T> (<t:${Math.floor(endMs / 1000)}:R>)！`).catch(() => {});
       }
     }
   }
@@ -625,7 +625,7 @@ async function generateJobEmbed(targetJob) {
   if (targetJob === 'WARDEN_LIST') {
     const wardens = members.filter(m => !m.isRetired && parseInt(m.mainLevel) >= 200);
     const desc = wardens.length
-      ? wardens.map((m, i) => `${i + 1}. 👑 \`${m.nickname || ''}(${m.mainIgn}_${m.mainJob}_${m.mainLevel}等)\` - <@${m.userId}>`).join('\n')
+      ? wardens.map((m, i) => `${i + 1}. 👑 \`${m.nickname || ''}[${m.mainLevel}_${m.mainJob}]\` - <@${m.userId}>`).join('\n')
       : '目前尚未誕生 Lv 200 典獄長！';
     return new EmbedBuilder().setColor(0xF1C40F).setTitle('👑【尊榮的 Lv 200_典獄長】傳奇名冊').setDescription(desc);
   }
@@ -637,10 +637,10 @@ async function generateJobEmbed(targetJob) {
       const charList = [];
       members.forEach(m => {
         if (m.isRetired) return;
-        const nickTag = m.nickname ? `[${m.nickname}] ` : '';
-        if (m.mainJob === j) charList.push({ text: `\`${nickTag}(${m.mainIgn}_Lv.${m.mainLevel})\` <@${m.userId}> **【本】**`, lv: parseInt(m.mainLevel) || 0 });
+        const nickPrefix = m.nickname ? `${m.nickname}` : '';
+        if (m.mainJob === j) charList.push({ text: `\`${nickPrefix}[${m.mainLevel}_${m.mainJob}]\`（${m.mainIgn}）<@${m.userId}> **【本】**`, lv: parseInt(m.mainLevel) || 0 });
         (m.subs || []).forEach(s => {
-          if (s?.job === j) charList.push({ text: `\`${nickTag}(${s.ign}_Lv.${s.level})\` <@${m.userId}> *(本尊: ${m.mainIgn})*`, lv: parseInt(s.level) || 0 });
+          if (s?.job === j) charList.push({ text: `\`${nickPrefix}[${s.level}_${s.job}]\`（${s.ign}）<@${m.userId}> *(本尊: ${m.mainIgn})*`, lv: parseInt(s.level) || 0 });
         });
       });
       if (charList.length && fCount < 24) {
@@ -655,10 +655,10 @@ async function generateJobEmbed(targetJob) {
   const list = [];
   members.forEach(m => {
     if (m.isRetired) return;
-    const nickTag = m.nickname ? `[${m.nickname}] ` : '';
-    if (m.mainJob === targetJob) list.push({ text: `\`${nickTag}(${m.mainIgn}_Lv.${m.mainLevel})\` - <@${m.userId}> **【本尊】**`, lv: parseInt(m.mainLevel) || 0 });
+    const nickPrefix = m.nickname ? `${m.nickname}` : '';
+    if (m.mainJob === targetJob) list.push({ text: `\`${nickPrefix}[${m.mainLevel}_${m.mainJob}]\`（${m.mainIgn}）- <@${m.userId}> **【本尊】**`, lv: parseInt(m.mainLevel) || 0 });
     (m.subs || []).forEach(s => {
-      if (s?.job === targetJob) list.push({ text: `\`${nickTag}(${s.ign}_Lv.${s.level})\` - <@${m.userId}> [本尊: \`${m.mainIgn}\`]`, lv: parseInt(s.level) || 0 });
+      if (s?.job === targetJob) list.push({ text: `\`${nickPrefix}[${s.level}_${s.job}]\`（${s.ign}）- <@${m.userId}> [本尊: \`${m.mainIgn}\`]`, lv: parseInt(s.level) || 0 });
     });
   });
   list.sort((a, b) => b.lv - a.lv);
@@ -682,7 +682,7 @@ function buildJobQueryMenu(isAdmin = false) {
 }
 
 // ==========================================
-// 6. 頂層指令註冊 (Guild 秒速同步)
+// 6. 頂層指令清單 (格式: 綽號[等級_職業])
 // ==========================================
 const commands = [
   new SlashCommandBuilder()
@@ -801,15 +801,13 @@ client.once(Events.ClientReady, async () => {
     console.log('✅ 指令註冊更新完成');
   } catch (e) { console.error('❌ 指令註冊失敗:', e); }
 
-  // 1. 每 15 分鐘定時巡檢：
-  //    (A) 賭局到期催促派彩 (限 4 次，超過 2 小時私訊超級管理員)
-  //    (B) 角色借用逾時催促下線 (附帶延長按鈕)
+  // 定時巡檢
   cron.schedule('*/15 * * * *', async () => {
     if (!db) return;
     try {
       const now = Date.now();
 
-      // (A) 賭局催促與管理員介入
+      // (A) 賭局催促
       const snapBet = await db.collection('active_bets').where('isSettled', '==', false).get();
       for (const doc of snapBet.docs) {
         const d = doc.data();
@@ -839,7 +837,7 @@ client.once(Events.ClientReady, async () => {
         }
       }
 
-      // (B) 角色借用逾時催促 (附帶延長時長按鈕)
+      // (B) 角色借用逾時催促
       const snapChar = await db.collection('char_statuses').where('isOnline', '==', true).get();
       for (const doc of snapChar.docs) {
         const d = doc.data();
@@ -860,7 +858,7 @@ client.once(Events.ClientReady, async () => {
     } catch (e) { console.error('15分鐘定時巡檢異常:', e.message); }
   });
 
-  // 2. 每日 08:00 (199 等倒數廣播)
+  // 199等倒數
   cron.schedule('0 0 8 * * *', async () => {
     try {
       const channel = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
@@ -874,7 +872,7 @@ client.once(Events.ClientReady, async () => {
             const data = doc.data();
             const start = data.reach199At ? data.reach199At.toMillis() : now;
             const days = Math.floor((now - start) / (1000 * 60 * 60 * 24)) + 1;
-            countdownTexts.push(`🔥 <@${data.userId}>（\`${data.nickname || ''}${data.mainIgn}\` - ${data.mainJob}）邁向 200 等修煉：**第 ${days} 天**！`);
+            countdownTexts.push(`🔥 <@${data.userId}>（\`${data.nickname || ''}[${data.mainLevel}_${data.mainJob}]\`）邁向 200 等修煉：**第 ${days} 天**！`);
           });
           if (countdownTexts.length) {
             const embed199 = new EmbedBuilder().setColor(0xE74C3C).setTitle('⏳【即將登頂 200 等】巔峰修煉倒數').setDescription(countdownTexts.join('\n'));
@@ -885,7 +883,7 @@ client.once(Events.ClientReady, async () => {
     } catch (e) { console.error('199廣播異常:', e.message); }
   }, { timezone: 'Asia/Taipei' });
 
-  // 3. 週一 09:00 突襲提醒
+  // 週一突襲
   cron.schedule('0 0 9 * * 1', async () => {
     try {
       const ch = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
@@ -899,7 +897,7 @@ client.once(Events.ClientReady, async () => {
     } catch (e) { console.error('週一廣播異常:', e.message); }
   }, { timezone: 'Asia/Taipei' });
 
-  // 4. 週二 09:00 & 19:00 每週名冊維護廣播
+  // 週二名冊廣播
   const sendTuesdayBroadcast = async () => {
     try {
       const ch = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
@@ -1017,7 +1015,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ embeds: [embed] });
       }
 
-      // 4. /查看 (私密選單模式)
+      // 4. /查看
       if (commandName === '查看') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', ephemeral: true });
         const view = interaction.options.getString('類別');
@@ -1353,7 +1351,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(modal);
       }
 
-      // 3. 報到精靈立即建檔
+      // 3. 報到精靈立即建檔 (伺服器暱稱: 綽號[等級_職業])
       if (customId === 'wiz_btn_finish') {
         await interaction.deferReply({ ephemeral: true });
         const session = wizardSessionMap.get(interaction.user.id);
@@ -1401,10 +1399,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           mainJob, mainLevel, subs: session.subs
         });
 
+        // 伺服器暱稱變更: 綽號[等級_職業]
         try {
           const member = await interaction.guild.members.fetch(targetUid).catch(() => null);
           if (member) {
-            const formattedNick = `${nickname}[${mainLevel}_${mainJob}] ${mainIgn}`.substring(0, 32);
+            const formattedNick = `${nickname}[${mainLevel}_${mainJob}]`.substring(0, 32);
             await member.setNickname(formattedNick).catch(() => {});
           }
         } catch {}
@@ -1668,7 +1667,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (optIdx === undefined || isNaN(optIdx) || !d.options[optIdx]) return interaction.editReply('⚠️ 請先在上方選單選擇你要投注的選項！');
 
         const prev = await fetchUserDocSafe(interaction.user.id);
-        const ign = prev.mainIgn || interaction.user.displayName;
+        const ign = prev.nickname || prev.mainIgn || interaction.user.displayName;
         const cur = d.options[optIdx].bets[interaction.user.id]?.amount || 0;
         d.options[optIdx].bets[interaction.user.id] = { ign, amount: cur + 1000000 };
         d.options[optIdx].pool = (d.options[optIdx].pool || 0) + 1000000;
@@ -2344,7 +2343,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         const prev = await fetchUserDocSafe(interaction.user.id);
-        const ign = prev.mainIgn || interaction.user.displayName;
+        const ign = prev.nickname || prev.mainIgn || interaction.user.displayName;
         const cur = d.options[optIdx].bets[interaction.user.id]?.amount || 0;
 
         d.options[optIdx].bets[interaction.user.id] = { ign, amount: cur + amt };
@@ -2374,7 +2373,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         if (amt <= 0) return interaction.editReply('❌ 金額無效！');
         const prev = await fetchUserDocSafe(interaction.user.id);
-        const ign = prev.mainIgn || interaction.user.displayName;
+        const ign = prev.nickname || prev.mainIgn || interaction.user.displayName;
 
         d.pityDonations = d.pityDonations || {};
         d.pityDonations[interaction.user.id] = { ign, amount: (d.pityDonations[interaction.user.id]?.amount || 0) + amt };
@@ -2509,7 +2508,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.reply({ content: '✅ 成功將效率報告分享至頻道！', ephemeral: true });
       }
 
-      // 9. 名片等級更新與新增分身
+      // 9. 名片等級更新與新增分身 (伺服器暱稱: 綽號[等級_職業])
       if (customId.startsWith('modal_card_set_level_')) {
         await interaction.deferReply({ ephemeral: true });
         const parts = customId.replace('modal_card_set_level_', '').split('_');
@@ -2548,7 +2547,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           try {
             const member = await interaction.guild.members.fetch(targetUid).catch(() => null);
             if (member) {
-              const formattedNick = `${profile.nickname ? `[${profile.nickname}] ` : ''}[${newLevel}_${profile.mainJob}] ${profile.mainIgn}`.substring(0, 32);
+              const formattedNick = `${profile.nickname || ''}[${newLevel}_${profile.mainJob}]`.substring(0, 32);
               await member.setNickname(formattedNick).catch(() => {});
             }
           } catch {}

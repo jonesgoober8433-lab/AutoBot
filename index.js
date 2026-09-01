@@ -222,7 +222,7 @@ async function fetchUserDocSafe(userId) {
 async function getCharStatusDoc(charIgn) {
   if (!db || !charIgn) return null;
   try {
-    const doc = await db.collection('char_statuses').doc(charIgn.toLowerCase()).get();
+    const doc = await db.collection('char_statuses').doc(charIgn.trim().toLowerCase()).get();
     return doc.exists ? doc.data() : null;
   } catch { return null; }
 }
@@ -252,15 +252,16 @@ async function syncMemberRoles(guild, userId, profileData) {
     });
     if (parseInt(profileData.mainLevel) >= 200) rolesToAdd.push(ROLES.WARDEN_200);
 
-    const allJobIds = Object.values(ROLES.JOBS);
+    const safeRolesToAdd = rolesToAdd.filter(Boolean);
+    const allJobIds = Object.values(ROLES.JOBS).filter(Boolean);
     const rolesToRemove = member.roles.cache.filter(r =>
-      (allJobIds.includes(r.id) && !rolesToAdd.includes(r.id)) ||
+      (allJobIds.includes(r.id) && !safeRolesToAdd.includes(r.id)) ||
       r.id === ROLES.UNVERIFIED ||
       (r.id === ROLES.WARDEN_200 && parseInt(profileData.mainLevel) < 200)
     );
 
     if (rolesToRemove.size) await member.roles.remove(rolesToRemove).catch(() => {});
-    await member.roles.add(rolesToAdd).catch(() => {});
+    if (safeRolesToAdd.length) await member.roles.add(safeRolesToAdd).catch(() => {});
   } catch (e) { console.error('身分組同步異常:', e.message); }
 }
 
@@ -417,7 +418,7 @@ async function processBorrowCharacter(interaction, ign, durationStr) {
     expectedEndTime: endMs
   };
 
-  await db.collection('char_statuses').doc(ign.toLowerCase()).set(newStatus, { merge: true });
+  await db.collection('char_statuses').doc(ign.trim().toLowerCase()).set(newStatus, { merge: true });
 
   const owners = prevDoc.owners || [];
   for (const ownerUid of owners) {
@@ -439,7 +440,7 @@ async function processReturnCharacter(interaction, ign, isForce = false) {
 
   const oldBorrowerId = prevDoc.currentUserId;
 
-  await db.collection('char_statuses').doc(ign.toLowerCase()).set({
+  await db.collection('char_statuses').doc(ign.trim().toLowerCase()).set({
     isOnline: false, currentUserId: null, currentUserName: null, startTime: 0, expectedEndTime: 0
   }, { merge: true });
 
@@ -682,7 +683,7 @@ function buildJobQueryMenu(isAdmin = false) {
 }
 
 // ==========================================
-// 6. 頂層指令清單 (格式: 綽號[等級_職業])
+// 6. 頂層指令清單
 // ==========================================
 const commands = [
   new SlashCommandBuilder()
@@ -777,14 +778,15 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('管理員功能')
-    .setDescription('【超級管理員專用】管理手冊、代填名冊、代管控制台與調整共同所有權人')
+    .setDescription('【超級管理員專用】管理手冊、代填名冊、代管控制台、一鍵標記未認證與調整共同所有權人')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addStringOption(o => o.setName('模式').setDescription('選擇管理操作').setRequired(true)
       .addChoices(
         { name: '📖 說明手冊 (help) - 檢視目前所有管理員功能清單', value: 'ADMIN_HELP' },
         { name: '📝 代填/代更新成員名冊', value: 'ADMIN_PROXY_REGISTER' },
         { name: '👥 管理員代管專用控制台 (代添/代更/代刪)', value: 'ADMIN_ROSTER_PANEL' },
-        { name: '👑 調整任意角色之共同所有權人', value: 'ADMIN_SET_OWNERS' }
+        { name: '👑 調整任意角色之共同所有權人', value: 'ADMIN_SET_OWNERS' },
+        { name: '🔒 一鍵標記未報到成員為「未認證」', value: 'ADMIN_SET_UNVERIFIED_ALL' }
       )
     )
     .addUserOption(o => o.setName('對象成員').setDescription('代填名冊時選擇對象成員 (@成員)').setRequired(false))
@@ -1149,9 +1151,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
               `1. 📝 **代填名冊** (\`/管理員功能 模式:代填名冊\`)\n` +
               `2. 👥 **代管控制台** (\`/管理員功能 模式:代管控制台\`)\n` +
               `3. 👑 **調整共同所有權人** (\`/管理員功能 模式:調整共同所有權人\`)\n` +
-              `4. 🚪 **強制刪除揪團 / 廢除賭局**`
+              `4. 🔒 **一鍵標記未報到成員為未認證** (\`/管理員功能 模式:一鍵標記未認證\`)\n` +
+              `5. 🚪 **強制刪除揪團 / 廢除賭局**`
             );
           return await interaction.reply({ embeds: [helpEmbed], ephemeral: true });
+        }
+
+        if (mode === 'ADMIN_SET_UNVERIFIED_ALL') {
+          await interaction.deferReply({ ephemeral: true });
+          const snap = await db.collection('member_profiles').get();
+          const registeredUids = new Set();
+          snap.forEach(doc => {
+            const data = doc.data();
+            if (!data.isRetired) registeredUids.add(doc.id);
+          });
+
+          const members = await interaction.guild.members.fetch();
+          let count = 0;
+
+          for (const member of members.values()) {
+            if (member.user.bot) continue;
+            if (!registeredUids.has(member.id)) {
+              if (!member.roles.cache.has(ROLES.UNVERIFIED)) {
+                await member.roles.add(ROLES.UNVERIFIED).catch(() => {});
+                count++;
+              }
+            }
+          }
+
+          return await interaction.editReply(`🔒 **一鍵標記完成！** 已成功為伺服器內 **${count}** 位尚未完成報到的成員添加【未認證】身分組！`);
         }
 
         if (mode === 'ADMIN_SET_OWNERS') {
@@ -1303,7 +1331,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton()) {
       const customId = interaction.customId;
 
-      // 1. 報到按鈕（開啟第一步 Modal）
+      // 1. 報到按鈕
       if (customId === 'btn_trigger_wizard_main') {
         const prev = await fetchUserDocSafe(interaction.user.id);
         wizardSessionMap.set(interaction.user.id, {
@@ -1339,7 +1367,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const session = wizardSessionMap.get(interaction.user.id);
         if (!session) return interaction.reply({ content: '❌ 報到已逾時，請重新點擊報到！', ephemeral: true });
 
-        if (session.step === 'SUB' && session.currentSub) {
+        if (session.step === 'SUB' && session.currentSub && session.currentSub.ign) {
           session.subs.push(session.currentSub);
         }
 
@@ -1351,42 +1379,51 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(modal);
       }
 
-      // 3. 報到精靈立即建檔 (伺服器暱稱: 綽號[等級_職業])
+      // 3. 報到精靈立即建檔
       if (customId === 'wiz_btn_finish') {
         await interaction.deferReply({ ephemeral: true });
         const session = wizardSessionMap.get(interaction.user.id);
         if (!session) return interaction.editReply('❌ 報到已逾時，請重新點擊報到！');
 
-        if (session.step === 'SUB' && session.currentSub) {
+        if (session.step === 'SUB' && session.currentSub && session.currentSub.ign) {
           session.subs.push(session.currentSub);
         }
 
-        const mainIgn = session.main.ign;
+        const mainIgn = (session.main.ign || '').trim();
         const mainJob = session.main.job || '黑騎士';
-        const mainLevel = session.main.level;
-        const nickname = session.nickname || interaction.user.username;
+        const mainLevel = (session.main.level || '120').replace(/[^0-9]/g, '') || '120';
+        const nickname = (session.nickname || interaction.user.username).trim();
         const targetUid = session.targetUserId || interaction.user.id;
+
+        const validSubs = (session.subs || []).filter(s => s && s.ign && s.ign.trim()).map(s => ({
+          ign: s.ign.trim(),
+          job: s.job || '主教',
+          level: (s.level || '120').replace(/[^0-9]/g, '') || '120',
+          owners: Array.isArray(s.owners) ? s.owners : [targetUid]
+        }));
 
         if (db) {
           await db.collection('member_profiles').doc(targetUid).set({
             userId: targetUid,
             nickname,
             mainIgn, mainJob, mainLevel,
-            playtime: session.playtime,
-            joinReason: session.joinReason,
-            owners: session.main.owners,
-            subs: session.subs,
+            playtime: session.playtime || '未填',
+            joinReason: session.joinReason || '未填',
+            owners: session.main.owners || [targetUid],
+            subs: validSubs,
             isRetired: false,
             timestamp: admin.firestore.FieldValue.serverTimestamp()
           });
 
-          const mainStatus = await getCharStatusDoc(mainIgn);
-          const mergedMainOwners = Array.from(new Set([...(mainStatus?.owners || []), ...session.main.owners]));
-          await db.collection('char_statuses').doc(mainIgn.toLowerCase()).set({
-            charIgn: mainIgn, job: mainJob, owners: mergedMainOwners, isOnline: mainStatus?.isOnline || false
-          }, { merge: true });
+          if (mainIgn) {
+            const mainStatus = await getCharStatusDoc(mainIgn);
+            const mergedMainOwners = Array.from(new Set([...(mainStatus?.owners || []), ...(session.main.owners || [targetUid])]));
+            await db.collection('char_statuses').doc(mainIgn.toLowerCase()).set({
+              charIgn: mainIgn, job: mainJob, owners: mergedMainOwners, isOnline: mainStatus?.isOnline || false
+            }, { merge: true });
+          }
 
-          for (const s of session.subs) {
+          for (const s of validSubs) {
             const subStatus = await getCharStatusDoc(s.ign);
             const mergedSubOwners = Array.from(new Set([...(subStatus?.owners || []), ...s.owners]));
             await db.collection('char_statuses').doc(s.ign.toLowerCase()).set({
@@ -1396,10 +1433,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         await syncMemberRoles(interaction.guild, targetUid, {
-          mainJob, mainLevel, subs: session.subs
+          mainJob, mainLevel, subs: validSubs
         });
 
-        // 伺服器暱稱變更: 綽號[等級_職業]
         try {
           const member = await interaction.guild.members.fetch(targetUid).catch(() => null);
           if (member) {
@@ -1419,10 +1455,75 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await publicChannel.send({ content: `<@${targetUid}>`, embeds: [publicEmbed] }).catch(() => {});
         }
 
-        return await interaction.editReply(`🎉 恭喜完成名冊建檔！成員 <@${targetUid}> 的本尊與 ${session.subs.length} 隻分身已全部獨立拆分建檔，身分組與伺服器暱稱已同步更新！`);
+        return await interaction.editReply(`🎉 恭喜完成名冊建檔！成員 <@${targetUid}> 的本尊與 ${validSubs.length} 隻分身已全部獨立拆分建檔，身分組與伺服器暱稱已同步更新！`);
       }
 
-      // 4. 角色狀態看板按鈕
+      // 4. 揪團：報名入口（完整列出所有本尊與全部已登入分身）
+      if (customId.startsWith('party_join_')) {
+        await interaction.deferReply({ ephemeral: true });
+        const pId = customId.replace('party_join_', '');
+        const prev = await fetchUserDocSafe(interaction.user.id);
+
+        const allChars = [];
+        if (prev.mainIgn) allChars.push({ ign: prev.mainIgn, job: prev.mainJob || '黑騎士', lv: prev.mainLevel || '120', isMain: true, idx: -1 });
+        (prev.subs || []).forEach((s, idx) => {
+          if (s?.ign) allChars.push({ ign: s.ign, job: s.job || '主教', lv: s.level || '120', isMain: false, idx });
+        });
+
+        const rows = [];
+        let currentRow = new ActionRowBuilder();
+
+        allChars.forEach((c) => {
+          if (currentRow.components.length >= 5) {
+            rows.push(currentRow);
+            currentRow = new ActionRowBuilder();
+          }
+          const btnId = c.isMain ? `party_reg_char_${pId}_main` : `party_reg_char_${pId}_sub_${c.idx}`;
+          const label = c.isMain ? `👑 ${c.ign} (${c.job})` : `⚔️ ${c.ign} (${c.job})`;
+          currentRow.addComponents(new ButtonBuilder().setCustomId(btnId).setLabel(label.substring(0, 80)).setStyle(c.isMain ? ButtonStyle.Success : ButtonStyle.Primary));
+        });
+
+        if (currentRow.components.length > 0 && rows.length < 4) {
+          rows.push(currentRow);
+        }
+
+        const customRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`party_reg_custom_single_${pId}`).setLabel('✏️ 自訂其他角色報名 (單一彈窗)').setStyle(ButtonStyle.Secondary)
+        );
+        rows.push(customRow);
+
+        return await interaction.editReply({ content: '👉 **請選擇要報名加入的本尊/分身角色（名下全部角色已列出）：**', components: rows });
+      }
+
+      // 5. 揪團：自訂角色報名（單一完整彈窗）
+      if (customId.startsWith('party_reg_custom_single_')) {
+        const pId = customId.replace('party_reg_custom_single_', '');
+        const modal = new ModalBuilder().setCustomId(`modal_party_custom_single_${pId}`).setTitle('自訂角色報名');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_ign').setLabel('1. 角色遊戲 ID (必填)').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_job').setLabel('2. 職業名稱 (例如: 主教、黑騎士)').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_lv').setLabel('3. 等級 (純數字)').setValue('120').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_seats').setLabel('4. 本角色加帶機台共佔幾人？').setValue('1').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_buffs').setLabel('5. Buff技能/楓祝說明 (選填)').setValue('楓祝滿').setStyle(TextInputStyle.Short).setRequired(false))
+        );
+        return await interaction.showModal(modal);
+      }
+
+      // 6. 揪團：名冊角色點選報名
+      if (customId.startsWith('party_reg_char_')) {
+        const parts = customId.split('_');
+        const pId = parts[3];
+        const type = parts[4];
+        const prev = await fetchUserDocSafe(interaction.user.id);
+        let ign = prev.mainIgn || interaction.user.displayName, job = prev.mainJob || '黑騎士', lv = prev.mainLevel || '120';
+        if (type === 'sub') {
+          const s = prev.subs?.[parseInt(parts[5])];
+          if (s) { ign = s.ign; job = s.job; lv = s.level; }
+        }
+        return await interaction.showModal(createPartyBuffModal(pId, ign, job, lv));
+      }
+
+      // 7. 角色狀態按鈕
       if (customId === 'borrow_btn_job_hub') {
         const jobOptions = Object.keys(ROLES.JOBS).map(j =>
           new StringSelectMenuOptionBuilder().setLabel(`⚔️ ${j}`).setValue(`hub_job_${j}`)
@@ -1494,7 +1595,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ content: '👉 **請選擇要強制收回的角色：**', components: [row] });
       }
 
-      // 5. 逾時私訊中的「延長借用時長」按鈕
       if (customId.startsWith('borrow_prompt_extend_')) {
         const ign = customId.replace('borrow_prompt_extend_', '');
         const modal = new ModalBuilder().setCustomId(`modal_borrow_char_${ign}`).setTitle(`延長借用時長 - 【${ign}】`);
@@ -1504,59 +1604,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(modal);
       }
 
-      // 6. 放圖取消預約
-      if (customId.startsWith('map_cancel_')) {
-        await interaction.deferReply({ ephemeral: true });
-        const mapId = customId.replace('map_cancel_', '');
-        const mapDoc = await db.collection('map_shares').doc(mapId).get();
-        if (!mapDoc.exists) return interaction.editReply('❌ 放圖資訊已失效。');
-        const mapData = mapDoc.data();
-
-        if (mapData.takerId !== interaction.user.id && mapData.creatorId !== interaction.user.id && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
-          return interaction.editReply('❌ 您無權取消此預約！');
-        }
-        await db.collection('map_shares').doc(mapId).update({ takerId: null });
-        return await interaction.editReply('✅ 已成功取消預約！');
-      }
-
-      // 7. 揪團按鈕
-      if (customId.startsWith('party_reg_char_')) {
-        const parts = customId.split('_');
-        const pId = parts[3];
-        const type = parts[4];
-        const prev = await fetchUserDocSafe(interaction.user.id);
-        let ign = prev.mainIgn || interaction.user.displayName, job = prev.mainJob || '黑騎士', lv = prev.mainLevel || '120';
-        if (type === 'sub') {
-          const s = prev.subs?.[parseInt(parts[5])];
-          if (s) { ign = s.ign; job = s.job; lv = s.level; }
-        }
-        return await interaction.showModal(createPartyBuffModal(pId, ign, job, lv));
-      }
-
-      if (customId.startsWith('party_reg_custom_step1_')) {
-        const pId = customId.replace('party_reg_custom_step1_', '');
-        const modal = new ModalBuilder().setCustomId(`modal_party_custom_s1_${pId}`).setTitle('自訂角色報名 (步驟 1/2)');
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_ign').setLabel('角色遊戲 ID').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_job').setLabel('職業名稱 (例如: 主教、黑騎士)').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_lv').setLabel('等級').setValue('120').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_seats').setLabel('加帶機台共佔幾人？(預設 1)').setValue('1').setStyle(TextInputStyle.Short).setRequired(true))
-        );
-        return await interaction.showModal(modal);
-      }
-
-      if (customId.startsWith('party_join_')) {
-        const pId = customId.replace('party_join_', '');
-        const prev = await fetchUserDocSafe(interaction.user.id);
-        const rows = [];
-        const r1 = new ActionRowBuilder();
-        if (prev.mainIgn) r1.addComponents(new ButtonBuilder().setCustomId(`party_reg_char_${pId}_main`).setLabel(`👑 本尊：${prev.mainIgn}`.substring(0, 80)).setStyle(ButtonStyle.Success));
-        (prev.subs || []).slice(0, 3).forEach((s, idx) => r1.addComponents(new ButtonBuilder().setCustomId(`party_reg_char_${pId}_sub_${idx}`).setLabel(`⚔️ ${s.ign}`.substring(0, 80)).setStyle(ButtonStyle.Primary)));
-        if (r1.components.length) rows.push(r1);
-        rows.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`party_reg_custom_step1_${pId}`).setLabel('✏️ 自訂其他角色報名').setStyle(ButtonStyle.Secondary)));
-        return await interaction.reply({ content: '👉 **請選擇要報名加入的角色：**', components: rows, ephemeral: true });
-      }
-
+      // 8. 揪團其他管理
       if (customId.startsWith('party_leave_select_')) {
         await interaction.deferReply({ ephemeral: true });
         const pId = customId.replace('party_leave_select_', '');
@@ -1653,7 +1701,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`🗑️ 揪團【**${d.target}**】已徹底刪除，已自動向所有報名成員發送取消通知！`);
       }
 
-      // 8. 賭局下注與結算按鈕
+      // 9. 賭局下注與結算
       if (customId.startsWith('bet_qk_') || customId.startsWith('bet_act100w_')) {
         await interaction.deferReply({ ephemeral: true });
         const isAct = customId.startsWith('bet_act100w_');
@@ -1737,123 +1785,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`settle_fin_${bId}`).setPlaceholder('選擇獲勝選項').addOptions(selectOptions))]
         });
       }
-
-      // 9. 名片管理與經驗計算器
-      if (customId === 'card_btn_add_char') {
-        userChoiceMap.set(`target_add_user_${interaction.user.id}`, interaction.user.id);
-        const modal = new ModalBuilder().setCustomId('modal_card_add_char').setTitle('名片管理 - 新增分身角色');
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('add_char_ign').setLabel('角色遊戲 ID (必填)').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('add_char_job').setLabel('職業 (例如: 黑騎士、主教、夜使者)').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('add_char_level').setLabel('等級 (必填)').setValue('120').setStyle(TextInputStyle.Short).setRequired(true))
-        );
-        return await interaction.showModal(modal);
-      }
-
-      if (customId === 'card_btn_update_level') {
-        await interaction.deferReply({ ephemeral: true });
-        const profile = await fetchUserDocSafe(interaction.user.id);
-        const chars = [];
-        if (profile.mainIgn) chars.push({ ign: profile.mainIgn, job: profile.mainJob, lv: profile.mainLevel, isMain: true });
-        (profile.subs || []).forEach(s => chars.push({ ign: s.ign, job: s.job, lv: s.level, isMain: false }));
-
-        if (!chars.length) return interaction.editReply('❌ 您尚未登記任何角色！');
-
-        userChoiceMap.set(`target_mod_user_${interaction.user.id}`, interaction.user.id);
-        const selectOptions = chars.slice(0, 25).map((c, i) =>
-          new StringSelectMenuOptionBuilder().setLabel(`${c.isMain ? '👑 本尊' : '⚔️ 分身'}：${c.ign} (${c.job} Lv.${c.lv})`.substring(0, 100)).setValue(`lvl_update_${interaction.user.id}_${i}_${c.ign}`)
-        );
-        const row = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder().setCustomId('select_char_to_update_level').setPlaceholder('🔽 請選擇要更新等級的角色').addOptions(selectOptions)
-        );
-        return await interaction.editReply({ content: '👉 **請選擇要升級/調整等級的角色：**', components: [row] });
-      }
-
-      if (customId === 'card_btn_delete_char') {
-        await interaction.deferReply({ ephemeral: true });
-        const profile = await fetchUserDocSafe(interaction.user.id);
-        const chars = (profile.subs || []).map((s, i) => ({ ign: s.ign, job: s.job, lv: s.level, idx: i }));
-
-        if (!chars.length) return interaction.editReply('💡 您目前沒有可刪除的分身角色 (本尊無法直接刪除，請重新報到覆蓋)！');
-
-        userChoiceMap.set(`target_del_user_${interaction.user.id}`, interaction.user.id);
-        const selectOptions = chars.slice(0, 25).map(c =>
-          new StringSelectMenuOptionBuilder().setLabel(`🗑️ 刪除：${c.ign} (${c.job} Lv.${c.lv})`.substring(0, 100)).setValue(`del_char_${interaction.user.id}_${c.idx}_${c.ign}`)
-        );
-        const row = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder().setCustomId('select_char_to_delete').setPlaceholder('⚠️ 請選擇欲刪除的分身角色').addOptions(selectOptions)
-        );
-        return await interaction.editReply({ content: '👉 **請選擇要從名冊中刪除的分身角色：**', components: [row] });
-      }
-
-      if (customId.startsWith('btn_confirm_delete_char_')) {
-        await interaction.deferReply({ ephemeral: true });
-        const parts = customId.split('_');
-        const targetUid = parts[4];
-        const charIdx = parseInt(parts[5]);
-        const ign = parts.slice(6).join('_');
-        const profile = await fetchUserDocSafe(targetUid);
-
-        let newSubs = (profile.subs || []);
-        if (!isNaN(charIdx) && newSubs[charIdx] && newSubs[charIdx].ign.toLowerCase() === ign.toLowerCase()) {
-          newSubs.splice(charIdx, 1);
-        } else {
-          newSubs = newSubs.filter(s => s.ign.toLowerCase() !== ign.toLowerCase());
-        }
-
-        await db.collection('member_profiles').doc(targetUid).update({ subs: newSubs });
-        await db.collection('char_statuses').doc(ign.toLowerCase()).delete().catch(() => {});
-
-        await syncMemberRoles(interaction.guild, targetUid, { ...profile, subs: newSubs });
-        return await interaction.editReply(`🗑️ 角色【**${ign}**】已成功自名冊與資料庫中徹底刪除，無效身分組已同步清理！`);
-      }
-
-      if (customId === 'exp_calc_trigger_start') {
-        const modal = new ModalBuilder().setCustomId('modal_exp_calc_start').setTitle('開始計算 - 輸入起始數據');
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_start_level').setLabel('1. 起始等級 (1 ~ 199)').setPlaceholder('例如：120').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_exp_start').setLabel('2. 起始經驗值 (支援數字或 35%)').setPlaceholder('例如：12500000 或 35%').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_meso_start').setLabel('3. 起始金幣 (選填)').setPlaceholder('例如：500w 或 5000000').setStyle(TextInputStyle.Short).setRequired(false))
-        );
-        return await interaction.showModal(modal);
-      }
-
-      if (customId === 'exp_calc_cancel') {
-        expTrackerMap.delete(interaction.user.id);
-        const embed = createExpCalculatorEmbed(null);
-        const comps = createExpCalculatorComponents(false);
-        return await interaction.update({ embeds: [embed], components: comps });
-      }
-
-      if (customId === 'exp_calc_stop') {
-        const session = expTrackerMap.get(interaction.user.id);
-        if (!session?.startTime) return interaction.reply({ content: '⚠️ 計時尚未開始，請先點擊開始！', ephemeral: true });
-
-        session.stopTime = Date.now();
-        expTrackerMap.set(interaction.user.id, session);
-
-        const modal = new ModalBuilder().setCustomId('modal_exp_calc_finish').setTitle('結束計算 - 輸入結束數據');
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_end_level').setLabel('1. 結束等級 (若升級請填新等級)').setValue(`${session.startLevel || 120}`).setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_exp_end').setLabel('2. 結束經驗值 (支援數字或 42%)').setPlaceholder('例如：13200000 或 42%').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_meso_end').setLabel('3. 結束金幣 (選填)').setPlaceholder('例如：420w 或 4200000').setStyle(TextInputStyle.Short).setRequired(false))
-        );
-        return await interaction.showModal(modal);
-      }
-
-      if (customId === 'exp_calc_trigger_share') {
-        const report = expTrackerMap.get(`report_${interaction.user.id}`);
-        if (!report) return interaction.reply({ content: '❌ 報告已失效，請重新計算！', ephemeral: true });
-
-        const modal = new ModalBuilder().setCustomId('modal_exp_calc_share').setTitle('📢 分享效率報告至頻道');
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('share_map_name').setLabel('地圖名稱 (必填)').setPlaceholder('例如：忘卻6、蛋龍、主巢穴').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('share_job').setLabel('職業 (必填)').setPlaceholder('例如：黑騎士、主教、夜使者').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('share_level').setLabel('等級 (必填)').setValue(`${report.endLevel || report.startLevel || 120}`).setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('share_note').setLabel('備註說明 (選填)').setPlaceholder('例如：自帶祈禱機、單練、開雙倍').setStyle(TextInputStyle.Paragraph).setRequired(false))
-        );
-        return await interaction.showModal(modal);
-      }
     }
 
     // ----------------------------------------
@@ -1862,7 +1793,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isStringSelectMenu() || interaction.isUserSelectMenu()) {
       const customId = interaction.customId;
 
-      // 1. /查看 全部揪團 -> 點選某一揪團調出原始面板
+      // 1. /查看 全部揪團
       if (customId === 'select_view_party_panel') {
         await interaction.deferReply({ ephemeral: true });
         const pId = interaction.values[0].replace('view_party_', '');
@@ -1897,7 +1828,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const charIgn = userChoiceMap.get(`admin_mod_owners_char_${interaction.user.id}`);
         if (!charIgn) return await interaction.followUp({ content: '❌ 操作逾時！', ephemeral: true });
 
-        await db.collection('char_statuses').doc(charIgn.toLowerCase()).set({ owners: interaction.values }, { merge: true });
+        await db.collection('char_statuses').doc(charIgn.trim().toLowerCase()).set({ owners: interaction.values }, { merge: true });
         userChoiceMap.delete(`admin_mod_owners_char_${interaction.user.id}`);
         return await interaction.followUp({ content: `✅ 已成功重設角色【**${charIgn}**】的共同所有權人為：${interaction.values.map(u => `<@${u}>`).join(', ')}`, ephemeral: true });
       }
@@ -2088,61 +2019,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         return await interaction.editReply({ embeds: [embed] });
       }
-
-      // 10. 名片與代管選單
-      if (customId === 'select_char_to_update_level') {
-        const val = interaction.values[0];
-        const parts = val.split('_');
-        let targetUid = userChoiceMap.get(`target_mod_user_${interaction.user.id}`) || interaction.user.id;
-        let charIdx = 0;
-        let ign = '';
-
-        if (parts.length >= 5) {
-          targetUid = parts[2];
-          charIdx = parseInt(parts[3]);
-          ign = parts.slice(4).join('_');
-        } else {
-          charIdx = parseInt(parts[2]);
-          ign = parts.slice(3).join('_');
-        }
-
-        userChoiceMap.set(`target_mod_user_${interaction.user.id}`, targetUid);
-        userChoiceMap.set(`target_mod_idx_${interaction.user.id}`, charIdx);
-
-        const modal = new ModalBuilder().setCustomId(`modal_card_set_level_${targetUid}_${charIdx}_${ign}`).setTitle(`更新【${ign}】等級`);
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('new_level_input').setLabel('請輸入最新等級 (純數字)').setStyle(TextInputStyle.Short).setRequired(true))
-        );
-        return await interaction.showModal(modal);
-      }
-
-      if (customId === 'select_char_to_delete') {
-        const val = interaction.values[0];
-        const parts = val.split('_');
-        let targetUid = userChoiceMap.get(`target_del_user_${interaction.user.id}`) || interaction.user.id;
-        let charIdx = 0;
-        let ign = '';
-
-        if (parts.length >= 5) {
-          targetUid = parts[2];
-          charIdx = parseInt(parts[3]);
-          ign = parts.slice(4).join('_');
-        } else {
-          charIdx = parseInt(parts[2]);
-          ign = parts.slice(3).join('_');
-        }
-
-        userChoiceMap.set(`target_del_user_${interaction.user.id}`, targetUid);
-
-        const embedConfirm = new EmbedBuilder()
-          .setColor(0xED4245)
-          .setTitle(`⚠️ 刪除確認：【${ign}】`)
-          .setDescription(`您確定要將分身角色【**${ign}**】從名冊與共用資料庫中徹底刪除嗎？\n刪除後對應的副職業身分組將一併清理！`);
-        const rowConfirm = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`btn_confirm_delete_char_${targetUid}_${charIdx}_${ign}`).setLabel('🗑️ 確定刪除').setStyle(ButtonStyle.Danger)
-        );
-        return await interaction.reply({ embeds: [embedConfirm], components: [rowConfirm], ephemeral: true });
-      }
     }
 
     // ----------------------------------------
@@ -2151,7 +2027,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isModalSubmit()) {
       const customId = interaction.customId;
 
-      // 1. 報到精靈第一步提交 (本尊資料與綽號)
+      // 1. 報到精靈第一步提交
       if (customId === 'modal_wizard_step1_main') {
         const nickname = interaction.fields.getTextInputValue('wiz_nickname').trim();
         const ign = interaction.fields.getTextInputValue('wiz_main_ign').trim();
@@ -2199,7 +2075,45 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await processBorrowCharacter(interaction, ign, durationStr);
       }
 
-      // 4. 揪團報名提交
+      // 4. 揪團自訂角色單一完整彈窗提交
+      if (customId.startsWith('modal_party_custom_single_')) {
+        await interaction.deferReply({ ephemeral: true });
+        const pId = customId.replace('modal_party_custom_single_', '');
+        const doc = await db.collection('party_trainings').doc(pId).get();
+        if (!doc.exists) return interaction.editReply('❌ 揪團不存在。');
+        const pData = doc.data();
+
+        const ign = interaction.fields.getTextInputValue('c_ign').trim();
+        const rawJob = interaction.fields.getTextInputValue('c_job').trim();
+        const lv = interaction.fields.getTextInputValue('c_lv').replace(/[^0-9]/g, '') || '120';
+        const seatCount = Math.max(1, parseInt(interaction.fields.getTextInputValue('c_seats')) || 1);
+        const buffNote = interaction.fields.getTextInputValue('c_buffs')?.trim() || '楓祝滿';
+
+        let job = '黑騎士';
+        for (const validJob of Object.keys(ROLES.JOBS)) {
+          if (rawJob.includes(validJob)) { job = validJob; break; }
+        }
+
+        const buffs = { '備註/技能': buffNote };
+        const members = (pData.members || []).filter(m => !(m.userId === interaction.user.id && m.ign.toLowerCase() === ign.toLowerCase()));
+        members.push({ userId: interaction.user.id, ign, job, level: lv, seatCount, buffs });
+
+        let currentCount = 0;
+        members.forEach(m => currentCount += (parseInt(m.seatCount) || 1));
+        const isFull = currentCount >= pData.maxCount;
+
+        await db.collection('party_trainings').doc(pId).update({ members });
+        if (pData.channelId && pData.messageId) {
+          const ch = await client.channels.fetch(pData.channelId).catch(() => null);
+          if (ch) {
+            const m = await ch.messages.fetch(pData.messageId).catch(() => null);
+            if (m) await m.edit({ embeds: [createPartyEmbed({ ...pData, members })], components: createPartyComponents(pId, pData.isClosed, isFull) }).catch(() => {});
+          }
+        }
+        return await interaction.editReply(`🎉 成功加入揪團！角色：\`${ign}\` (${job} Lv.${lv}，共佔 ${seatCount} 人)`);
+      }
+
+      // 5. 揪團名冊角色報名提交
       if (customId.startsWith('modal_party_buffs_')) {
         await interaction.deferReply({ ephemeral: true });
         const pId = customId.replace('modal_party_buffs_', '');
@@ -2234,63 +2148,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`🎉 成功加入揪團！角色：\`${ign}\` (${job} Lv.${lv}，共佔 ${seatCount} 人)`);
       }
 
-      if (customId.startsWith('modal_party_custom_s1_')) {
-        const pId = customId.replace('modal_party_custom_s1_', '');
-        const ign = interaction.fields.getTextInputValue('c_ign').trim();
-        const rawJob = interaction.fields.getTextInputValue('c_job').trim();
-        const lv = interaction.fields.getTextInputValue('c_lv').replace(/[^0-9]/g, '') || '120';
-        const seats = Math.max(1, parseInt(interaction.fields.getTextInputValue('c_seats')) || 1);
-
-        let job = '黑騎士';
-        for (const validJob of Object.keys(ROLES.JOBS)) {
-          if (rawJob.includes(validJob)) { job = validJob; break; }
-        }
-
-        const modal = new ModalBuilder().setCustomId(`modal_party_custom_s2_${pId}`).setTitle(`自訂報名 (${job} Lv.${lv})`);
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_data').setLabel('確認資料 (ID/職業/等級/人數)').setValue(`${ign}/${job}/${lv}/${seats}`).setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_maple').setLabel('【🍁楓葉祝福】等級').setValue('滿').setStyle(TextInputStyle.Short).setRequired(true))
-        );
-        const buffs = JOB_BUFFS[job] || [];
-        if (buffs[0]) modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_buff1').setLabel(`【${buffs[0]}】等級`).setValue('滿').setStyle(TextInputStyle.Short).setRequired(false)));
-        if (buffs[1]) modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c_buff2').setLabel(`【${buffs[1]}】等級`).setValue('滿').setStyle(TextInputStyle.Short).setRequired(false)));
-        return await interaction.showModal(modal);
-      }
-
-      if (customId.startsWith('modal_party_custom_s2_')) {
-        await interaction.deferReply({ ephemeral: true });
-        const pId = customId.replace('modal_party_custom_s2_', '');
-        const doc = await db.collection('party_trainings').doc(pId).get();
-        if (!doc.exists) return interaction.editReply('❌ 揪團不存在。');
-        const pData = doc.data();
-
-        const raw = interaction.fields.getTextInputValue('c_data').split('/');
-        const ign = raw[0], job = raw[1], lv = raw[2], seatCount = parseInt(raw[3]) || 1;
-        const buffs = { '楓祝': interaction.fields.getTextInputValue('c_maple') || '滿' };
-
-        const defined = JOB_BUFFS[job] || [];
-        if (defined[0] && interaction.fields.getTextInputValue('c_buff1')) buffs[defined[0]] = interaction.fields.getTextInputValue('c_buff1');
-        if (defined[1] && interaction.fields.getTextInputValue('c_buff2')) buffs[defined[1]] = interaction.fields.getTextInputValue('c_buff2');
-
-        const members = pData.members || [];
-        members.push({ userId: interaction.user.id, ign, job, level: lv, seatCount, buffs });
-
-        let currentCount = 0;
-        members.forEach(m => currentCount += (parseInt(m.seatCount) || 1));
-        const isFull = currentCount >= pData.maxCount;
-
-        await db.collection('party_trainings').doc(pId).update({ members });
-        if (pData.channelId && pData.messageId) {
-          const ch = await client.channels.fetch(pData.channelId).catch(() => null);
-          if (ch) {
-            const m = await ch.messages.fetch(pData.messageId).catch(() => null);
-            if (m) await m.edit({ embeds: [createPartyEmbed({ ...pData, members })], components: createPartyComponents(pId, pData.isClosed, isFull) }).catch(() => {});
-          }
-        }
-        return await interaction.editReply(`🎉 成功加入揪團！角色：\`${ign}\` (${job} Lv.${lv}，共佔 ${seatCount} 人)`);
-      }
-
-      // 5. 揪團修改提交
+      // 6. 揪團修改提交
       if (customId.startsWith('modal_party_edit_')) {
         await interaction.deferReply({ ephemeral: true });
         const pId = customId.replace('modal_party_edit_', '');
@@ -2319,7 +2177,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply('✅ 揪團資訊已成功更新！');
       }
 
-      // 6. 賭局自訂金額下注
+      // 7. 賭局自訂金額下注
       if (customId.startsWith('modal_bet_custom_')) {
         await interaction.deferReply({ ephemeral: true });
         const bId = customId.replace('modal_bet_custom_', '');
@@ -2362,7 +2220,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`✅ 成功為 **${d.options[optIdx].name}** 下注 \`${formatMeso(amt)} 楓幣\`！(個人累計: ${formatMeso(cur + amt)})`);
       }
 
-      // 7. 賭局同情抖內
+      // 8. 賭局同情抖內
       if (customId.startsWith('modal_pity_donate_')) {
         await interaction.deferReply({ ephemeral: true });
         const bId = customId.replace('modal_pity_donate_', '');
@@ -2379,211 +2237,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         d.pityDonations[interaction.user.id] = { ign, amount: (d.pityDonations[interaction.user.id]?.amount || 0) + amt };
         await db.collection('active_bets').doc(bId).update({ pityDonations: d.pityDonations });
         return await interaction.editReply(`🩹 已成功登記同情救濟 \`${formatMeso(amt)} 楓幣\`！感謝您的暖心善舉！`);
-      }
-
-      // 8. 經驗計算器
-      if (customId === 'modal_exp_calc_start') {
-        const startLevel = parseInt(interaction.fields.getTextInputValue('input_start_level')) || 120;
-        const rawExp = interaction.fields.getTextInputValue('input_exp_start');
-        const expStart = parseExpInput(rawExp, startLevel);
-        const mesoStart = parseMoneyInput(interaction.fields.getTextInputValue('input_meso_start'));
-        const startTime = Date.now();
-
-        const session = { startTime, startLevel, expStart, mesoStart };
-        expTrackerMap.set(interaction.user.id, session);
-
-        const embed = createExpCalculatorEmbed(session);
-        const comps = createExpCalculatorComponents(true);
-        return await interaction.reply({ content: `✅ **已成功鎖定 Lv.${startLevel} 起始數據，計時開始！**`, embeds: [embed], components: comps, ephemeral: true });
-      }
-
-      if (customId === 'modal_exp_calc_finish') {
-        await interaction.deferReply({ ephemeral: true });
-        const session = expTrackerMap.get(interaction.user.id);
-        if (!session?.startTime) return interaction.editReply('❌ 計時已失效，請重新開始！');
-
-        const endTime = session.stopTime || Date.now();
-        const durationSec = Math.max(1, Math.round((endTime - session.startTime) / 1000));
-        const durationMinText = `${Math.floor(durationSec / 60)} 分 ${durationSec % 60} 秒`;
-
-        const endLevel = parseInt(interaction.fields.getTextInputValue('input_end_level')) || session.startLevel;
-        const rawExpEnd = interaction.fields.getTextInputValue('input_exp_end');
-        const expEnd = parseExpInput(rawExpEnd, endLevel);
-
-        let totalGainExp = 0;
-        if (endLevel === session.startLevel) {
-          totalGainExp = Math.max(0, expEnd - session.expStart);
-        } else if (endLevel > session.startLevel) {
-          const startLvNeed = CLASSIC_EXP_TABLE[session.startLevel] || 1;
-          totalGainExp = Math.max(0, startLvNeed - session.expStart);
-          for (let lv = session.startLevel + 1; lv < endLevel; lv++) {
-            totalGainExp += (CLASSIC_EXP_TABLE[lv] || 0);
-          }
-          totalGainExp += expEnd;
-        } else {
-          totalGainExp = Math.max(0, expEnd - session.expStart);
-        }
-
-        const mesoEnd = parseMoneyInput(interaction.fields.getTextInputValue('input_meso_end'));
-        const hasMeso = session.mesoStart > 0 || interaction.fields.getTextInputValue('input_meso_end');
-        const deltaMeso = mesoEnd - session.mesoStart;
-
-        const expPer10Min = Math.round((totalGainExp / durationSec) * 600);
-        const expPerHour = Math.round((totalGainExp / durationSec) * 3600);
-        const mesoPer10Min = Math.round((deltaMeso / durationSec) * 600);
-        const mesoPerHour = Math.round((deltaMeso / durationSec) * 3600);
-
-        let mesoReport = '';
-        if (hasMeso) {
-          const sign10 = mesoPer10Min >= 0 ? '🟢 淨賺' : '🔴 虧損';
-          const signHour = mesoPerHour >= 0 ? '🟢 淨賺' : '🔴 虧損';
-          mesoReport = `━━━━━━━━━━━━━━━━━━━━\n` +
-            `💰 **實測楓幣收支**：\`${deltaMeso >= 0 ? '+' : ''}${formatMeso(deltaMeso)}\`\n` +
-            `🔹 **標準 10 分鐘損益**：${sign10} \`${formatMeso(Math.abs(mesoPer10Min))}\`\n` +
-            `🔹 **預估 1 小時損益**：${signHour} \`${formatMeso(Math.abs(mesoPerHour))}\``;
-        }
-
-        const reportData = {
-          durationMinText, durationSec, deltaExp: totalGainExp,
-          expPer10Min, expPerHour, hasMeso, deltaMeso, mesoPer10Min, mesoPerHour,
-          startLevel: session.startLevel, endLevel
-        };
-        expTrackerMap.set(`report_${interaction.user.id}`, reportData);
-        expTrackerMap.delete(interaction.user.id);
-
-        const levelUpTag = endLevel > session.startLevel ? ` 🆙 **(恭喜升級！Lv.${session.startLevel} ➔ Lv.${endLevel})**` : '';
-
-        const reportEmbed = new EmbedBuilder()
-          .setColor(0x57F287)
-          .setTitle(`📈【練等效率分析報告出爐】${levelUpTag}`)
-          .setDescription(
-            `⏱️ **實測時間**：\`${durationMinText}\` (共 ${durationSec} 秒)\n` +
-            `📊 **實測獲得總經驗**：\`+${totalGainExp.toLocaleString()} EXP\`\n` +
-            `━━━━━━━━━━━━━━━━━━━━\n` +
-            `⚡ **標準 10 分鐘效率**：\`+${expPer10Min.toLocaleString()} EXP\`\n` +
-            `🔥 **預估 1 小時效率**：\`+${expPerHour.toLocaleString()} EXP\`\n` +
-            mesoReport
-          )
-          .setFooter({ text: '練等效益精算 | 點擊下方按鈕可將結果分享至頻道！' });
-
-        const rowShare = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('exp_calc_trigger_share').setLabel('📢 分享至頻道').setStyle(ButtonStyle.Primary)
-        );
-        return await interaction.editReply({ embeds: [reportEmbed], components: [rowShare] });
-      }
-
-      if (customId === 'modal_exp_calc_share') {
-        const report = expTrackerMap.get(`report_${interaction.user.id}`);
-        if (!report) return interaction.reply({ content: '❌ 報告已失效，請重新計算！', ephemeral: true });
-
-        const mapName = interaction.fields.getTextInputValue('share_map_name').trim();
-        const job = interaction.fields.getTextInputValue('share_job').trim();
-        const level = interaction.fields.getTextInputValue('share_level').trim();
-        const note = interaction.fields.getTextInputValue('share_note')?.trim() || '無特殊備註';
-
-        let mesoReport = '';
-        if (report.hasMeso) {
-          const sign10 = report.mesoPer10Min >= 0 ? '🟢 淨賺' : '🔴 虧損';
-          mesoReport = `\n💰 **10分鐘楓幣收支**：${sign10} \`${formatMeso(Math.abs(report.mesoPer10Min))}\``;
-        }
-
-        const shareEmbed = new EmbedBuilder()
-          .setColor(0x3498DB)
-          .setTitle(`📢【練等效率分享】${mapName}`)
-          .setDescription(
-            `👤 **冒險家**：<@${interaction.user.id}>\n` +
-            `⚔️ **職業/等級**：\`${job} (Lv.${level})\`\n` +
-            `📍 **練等地點**：\`${mapName}\`\n` +
-            `⏱️ **實測時間**：\`${report.durationMinText}\`\n` +
-            `━━━━━━━━━━━━━━━━━━━━\n` +
-            `⚡ **標準 10 分鐘經驗**：\`+${report.expPer10Min.toLocaleString()} EXP\`\n` +
-            `🔥 **預估 1 小時經驗**：\`+${report.expPerHour.toLocaleString()} EXP\`` +
-            mesoReport + `\n` +
-            `━━━━━━━━━━━━━━━━━━━━\n` +
-            `📝 **備註說明**：\`${note}\``
-          )
-          .setFooter({ text: '社群效率分享庫 | 感謝分享' });
-
-        await interaction.channel.send({ embeds: [shareEmbed] });
-        return await interaction.reply({ content: '✅ 成功將效率報告分享至頻道！', ephemeral: true });
-      }
-
-      // 9. 名片等級更新與新增分身 (伺服器暱稱: 綽號[等級_職業])
-      if (customId.startsWith('modal_card_set_level_')) {
-        await interaction.deferReply({ ephemeral: true });
-        const parts = customId.replace('modal_card_set_level_', '').split('_');
-        const targetUid = parts[0];
-        const charIdx = parseInt(parts[1]);
-        const ign = parts.slice(2).join('_');
-        const newLevel = interaction.fields.getTextInputValue('new_level_input').replace(/[^0-9]/g, '') || '1';
-        const profile = await fetchUserDocSafe(targetUid);
-
-        let isMain = profile.mainIgn?.toLowerCase() === ign.toLowerCase();
-        let prevLevel = isMain ? profile.mainLevel : '1';
-
-        if (isMain) {
-          profile.mainLevel = newLevel;
-          if (newLevel === '199' && prevLevel !== '199') profile.reach199At = admin.firestore.FieldValue.serverTimestamp();
-          else if (newLevel !== '199') profile.reach199At = null;
-        } else {
-          if (!isNaN(charIdx) && profile.subs && profile.subs[charIdx]) {
-            prevLevel = profile.subs[charIdx].level;
-            profile.subs[charIdx].level = newLevel;
-          } else {
-            profile.subs = (profile.subs || []).map(s => {
-              if (s.ign.toLowerCase() === ign.toLowerCase()) {
-                prevLevel = s.level;
-                return { ...s, level: newLevel };
-              }
-              return s;
-            });
-          }
-        }
-
-        await db.collection('member_profiles').doc(targetUid).set(profile, { merge: true });
-        await syncMemberRoles(interaction.guild, targetUid, profile);
-
-        if (isMain) {
-          try {
-            const member = await interaction.guild.members.fetch(targetUid).catch(() => null);
-            if (member) {
-              const formattedNick = `${profile.nickname || ''}[${newLevel}_${profile.mainJob}]`.substring(0, 32);
-              await member.setNickname(formattedNick).catch(() => {});
-            }
-          } catch {}
-        }
-
-        return await interaction.editReply(`🆙 角色【**${ign}**】等級已成功更新為 **Lv.${newLevel}**！`);
-      }
-
-      if (customId === 'modal_card_add_char') {
-        await interaction.deferReply({ ephemeral: true });
-        const ign = interaction.fields.getTextInputValue('add_char_ign').trim();
-        const rawJob = interaction.fields.getTextInputValue('add_char_job').trim();
-        const level = interaction.fields.getTextInputValue('add_char_level').replace(/[^0-9]/g, '') || '120';
-        const targetUid = userChoiceMap.get(`target_add_user_${interaction.user.id}`) || interaction.user.id;
-
-        let job = '黑騎士';
-        for (const validJob of Object.keys(ROLES.JOBS)) {
-          if (rawJob.includes(validJob)) { job = validJob; break; }
-        }
-
-        const profile = await fetchUserDocSafe(targetUid);
-        const subs = profile.subs || [];
-        subs.push({ ign, job, level, raw: `${ign}/${job}/${level}` });
-
-        await db.collection('member_profiles').doc(targetUid).set({ subs }, { merge: true });
-
-        const sDoc = await getCharStatusDoc(ign);
-        const owners = sDoc?.owners || [];
-        if (!owners.includes(targetUid)) owners.push(targetUid);
-        await db.collection('char_statuses').doc(ign.toLowerCase()).set({
-          charIgn: ign, job, owners, isOnline: sDoc?.isOnline || false
-        }, { merge: true });
-
-        await syncMemberRoles(interaction.guild, targetUid, { ...profile, subs });
-        userChoiceMap.delete(`target_add_user_${interaction.user.id}`);
-        return await interaction.editReply(`🎉 成功為 <@${targetUid}> 新增分身角色【**${ign}**】(${job} Lv.${level})！對應副職身分組已自動加發！`);
       }
     }
   } catch (err) {

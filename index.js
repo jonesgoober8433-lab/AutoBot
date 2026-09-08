@@ -54,9 +54,7 @@ const JOB_BUFFS = {
   '刀賊': ['⚡速'], '拳霸': ['🥊最終極速'], '槍神': []
 };
 
-// ==========================================
-// 經典正服/阿泰爾對齊經驗表 (精準符合 Lv.142=96101520, Lv.175=558913012)
-// ==========================================
+// 正服/阿泰爾對齊經驗表 (Lv.142=96101520, Lv.175=558913012)
 const CLASSIC_EXP_TABLE = [
   0, 15, 34, 57, 92, 135, 372, 560, 840, 1242,
   1600, 2100, 2750, 3550, 4550, 5800, 7350, 9250, 11550, 14350,
@@ -135,8 +133,50 @@ const client = new Client({
 client.on('error', (err) => console.error('⚠️ Discord Client 發生錯誤:', err));
 
 // ==========================================
-// 4. 輔助計算工具
+// 4. 輔助計算工具與里程碑判定 (跨級支援)
 // ==========================================
+async function checkLevelMilestone(guild, user, prevLevel, newLevel, mainIgn, job) {
+  const pL = parseInt(prevLevel) || 0;
+  const nL = parseInt(newLevel) || 0;
+  if (nL <= pL) return null;
+
+  let privateEmbed = null;
+
+  // 1. 跨越 70 等三轉門檻
+  if (pL < 70 && nL >= 70) {
+    privateEmbed = new EmbedBuilder()
+      .setColor(0x9B59B6)
+      .setTitle('🎖️【三轉強者誕生】達成 70 級重大突破！')
+      .setDescription(`恭喜 <@${user.id}>（\`${mainIgn}\`）順利突破 70 級！\n正式踏入 ${job} 的高階冒險領域，向更強大的首領邁進吧！✨`);
+  }
+
+  // 2. 跨越 120 等以上「整十里程碑」(例如 189 -> 191，自動抓出 190 等廣播)
+  const prevDecade = Math.floor(pL / 10);
+  const newDecade = Math.floor(nL / 10);
+
+  if (newDecade > prevDecade && nL >= 120) {
+    const milestoneLevel = Math.min(200, newDecade * 10);
+    try {
+      const channel = await guild.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
+      if (channel?.isTextBased()) {
+        const is200 = milestoneLevel === 200 || nL >= 200;
+        const publicEmbed = new EmbedBuilder()
+          .setColor(is200 ? 0xF1C40F : 0xE67E22)
+          .setTitle(is200 ? '👑【全伺服器賀喜】頂點傳奇達成！Lv 200 典獄長誕生！' : '🎉【公會榮耀里程碑】等級重大突破！')
+          .setDescription(`冒險家 <@${user.id}>（\`${mainIgn}\`）達成 **Lv.${milestoneLevel} ${job}** 壯舉！（目前已達 Lv.${nL}）\n全體成員為這份堅持與熱血喝采！🔥`)
+          .setTimestamp();
+
+        await channel.send({
+          content: is200 ? '🎊 @everyone 傳奇現世！' : undefined,
+          embeds: [publicEmbed]
+        });
+      }
+    } catch (e) { console.error('發送升級祝賀失敗:', e); }
+  }
+
+  return privateEmbed;
+}
+
 function parseDeadline(inputStr) {
   if (!inputStr) return null;
   const str = inputStr.trim().toLowerCase();
@@ -279,9 +319,9 @@ function buildRegisterPanelEmbed() {
       `歡迎加入冒險公會！\n` +
       `點擊下方按鈕即可填寫您的 **本人綽號**、**本尊角色** 與 **多隻分身小號**。\n\n` +
       `✨ **系統亮點**：\n` +
-      `• 自動將暱稱同步更新為 \`綽號[等級_職業]\`。\n` +
+      `• 自動將伺服器暱稱更新為 \`綽號[等級_職業]\`。\n` +
       `• 自動發放本尊與分身專屬職業身分組。\n` +
-      `• 自動建立角色共用庫，方便夥伴登記借用與即時通知！`
+      `• 自動建立角色狀態庫，方便夥伴借用與即時通知！`
     )
     .setFooter({ text: '點擊下方按鈕即可隨時建檔或更新' });
 }
@@ -485,7 +525,7 @@ function createExpCalculatorEmbed(sessionData) {
           `⚔️ **起始等級**：\`${lvText}\`\n` +
           `📊 **起始經驗值**：\`${expStartText} EXP\`\n` +
           `💰 **起始楓幣量**：\`${mesoStartText} 楓幣\`\n\n` +
-          `💡 練完後請點擊下方 **「🛑 結束計算」**（點擊瞬間立即暫停計時），填寫結束等級與數據即可自動精算！`
+          `💡 練完後請點擊下方 **「🛑 結束計算」**（點擊瞬間立即暫停計時），填寫結束數據即可自動精算！`
         : `✨ 點擊下方 **「⏱️ 開始計算」** 輸入起始等級與數據後將自動開始計時！\n即使練等中途**升級**，系統也會透過經典經驗表精準換算為 **標準 10 分鐘與 1 小時產出**！`
     )
     .setFooter({ text: '楓之谷練等工具箱 | 升級防呆精算' });
@@ -686,7 +726,7 @@ function buildJobQueryMenu(isAdmin = false) {
 }
 
 // ==========================================
-// 6. 頂層指令清單 (完整 10 大指令全數就位)
+// 6. 頂層指令清單
 // ==========================================
 const commands = [
   new SlashCommandBuilder()
@@ -863,7 +903,7 @@ client.once(Events.ClientReady, async () => {
     } catch (e) { console.error('15分鐘定時巡檢異常:', e.message); }
   });
 
-  // 199等倒數
+  // 199等倒數廣播
   cron.schedule('0 0 8 * * *', async () => {
     try {
       const channel = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
@@ -2580,7 +2620,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`🩹 已成功登記同情救濟 \`${formatMeso(amt)} 楓幣\`！感謝您的暖心善舉！`);
       }
 
-      // 12. 名片等級更新與新增分身
+      // 12. 名片等級更新 (含跨級祝賀詞判定)
       if (customId.startsWith('modal_card_set_level_')) {
         await interaction.deferReply({ ephemeral: true });
         const parts = customId.replace('modal_card_set_level_', '').split('_');
@@ -2623,11 +2663,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
               await member.setNickname(formattedNick).catch(() => {});
             }
           } catch {}
+
+          // 跨級里程碑祝賀判定
+          const milestone = await checkLevelMilestone(interaction.guild, interaction.user, prevLevel, newLevel, profile.mainIgn, profile.mainJob);
+          if (milestone) await interaction.followUp({ embeds: [milestone], ephemeral: true });
         }
 
         return await interaction.editReply(`🆙 角色【**${ign}**】等級已成功更新為 **Lv.${newLevel}**！`);
       }
 
+      // 13. 名片新增分身提交
       if (customId === 'modal_card_add_char') {
         await interaction.deferReply({ ephemeral: true });
         const ign = interaction.fields.getTextInputValue('add_char_ign').trim();

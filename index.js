@@ -407,6 +407,9 @@ function buildWizardConfigCard(userId) {
   );
   const rowBtns = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('wiz_btn_add_sub').setLabel('➕ 加填分身角色').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('wiz_btn_retire')
+      .setLabel(session.isRetired ? '🚪 退休中（點此改回現役）' : '🟢 現役中（點此標記退休）')
+      .setStyle(session.isRetired ? ButtonStyle.Secondary : ButtonStyle.Success),
     new ButtonBuilder().setCustomId('wiz_btn_finish').setLabel('✅ 填寫完畢，立即建檔').setStyle(ButtonStyle.Success)
   );
 
@@ -419,6 +422,7 @@ function buildWizardConfigCard(userId) {
       `🔹 **角色ID**：\`${char.ign}\`\n` +
       `🔹 **職業**：\`${char.job || '請在下方選單選擇'}\`\n` +
       `🔹 **等級**：\`Lv. ${char.level}\`\n` +
+      (isMain ? `📌 **狀態**：${session.isRetired ? '🚪 退休（只多一個標記，身分組不會被拔掉）' : '🟢 現役'}\n` : '') +
       `━━━━━━━━━━━━━━━━━━━━\n` +
       (session.subs.length
         ? `📒 **已登記的分身（會一併保留）**：${session.subs.map(x => `\`${x.ign} Lv.${x.level}\``).join('、')}\n`
@@ -628,9 +632,9 @@ async function generateJobEmbed(targetJob) {
   snapshot.forEach(doc => members.push(doc.data()));
 
   if (targetJob === 'WARDEN_LIST') {
-    const wardens = members.filter(m => !m.isRetired && parseInt(m.mainLevel) >= 200);
+    const wardens = members.filter(m => parseInt(m.mainLevel) >= 200);
     const desc = wardens.length
-      ? wardens.map((m, i) => `${i + 1}. 👑 \`${m.nickname || ''}[${m.mainLevel}_${m.mainJob}]\` - <@${m.userId}>`).join('\n')
+      ? wardens.map((m, i) => `${i + 1}. 👑 \`${m.nickname || ''}[${m.mainLevel}_${m.mainJob}]\` - <@${m.userId}>${m.isRetired ? ' 🚪*已退休*' : ''}`).join('\n')
       : '目前尚未誕生 Lv 200 典獄長！';
     return new EmbedBuilder().setColor(0xF1C40F).setTitle('👑【尊榮的 Lv 200_典獄長】傳奇名冊').setDescription(desc);
   }
@@ -641,11 +645,11 @@ async function generateJobEmbed(targetJob) {
     for (const j of Object.keys(ROLES.JOBS)) {
       const charList = [];
       members.forEach(m => {
-        if (m.isRetired) return;
+        const retiredTag = m.isRetired ? ' 🚪*已退休*' : '';
         const nickPrefix = m.nickname ? `${m.nickname}` : '';
-        if (m.mainJob === j) charList.push({ text: `\`${nickPrefix}[${m.mainLevel}_${m.mainJob}]\`（${m.mainIgn}）<@${m.userId}> **【本尊】**`, lv: parseInt(m.mainLevel) || 0 });
+        if (m.mainJob === j) charList.push({ text: `\`${nickPrefix}[${m.mainLevel}_${m.mainJob}]\`（${m.mainIgn}）<@${m.userId}> **【本尊】**${retiredTag}`, lv: parseInt(m.mainLevel) || 0 });
         (m.subs || []).forEach(s => {
-          if (s?.job === j) charList.push({ text: `\`${nickPrefix}[${s.level}_${s.job}]\`（${s.ign}）<@${m.userId}> *(本尊: ${m.mainIgn})*`, lv: parseInt(s.level) || 0 });
+          if (s?.job === j) charList.push({ text: `\`${nickPrefix}[${s.level}_${s.job}]\`（${s.ign}）<@${m.userId}> *(本尊: ${m.mainIgn})*${retiredTag}`, lv: parseInt(s.level) || 0 });
         });
       });
       if (charList.length && fCount < 24) {
@@ -659,11 +663,11 @@ async function generateJobEmbed(targetJob) {
 
   const list = [];
   members.forEach(m => {
-    if (m.isRetired) return;
+    const retiredTag = m.isRetired ? ' 🚪*已退休*' : '';
     const nickPrefix = m.nickname ? `${m.nickname}` : '';
-    if (m.mainJob === targetJob) list.push({ text: `\`${nickPrefix}[${m.mainLevel}_${m.mainJob}]\`（${m.mainIgn}）- <@${m.userId}> **【本尊】**`, lv: parseInt(m.mainLevel) || 0 });
+    if (m.mainJob === targetJob) list.push({ text: `\`${nickPrefix}[${m.mainLevel}_${m.mainJob}]\`（${m.mainIgn}）- <@${m.userId}> **【本尊】**${retiredTag}`, lv: parseInt(m.mainLevel) || 0 });
     (m.subs || []).forEach(s => {
-      if (s?.job === targetJob) list.push({ text: `\`${nickPrefix}[${s.level}_${s.job}]\`（${s.ign}）- <@${m.userId}> [本尊: \`${m.mainIgn}\`]`, lv: parseInt(s.level) || 0 });
+      if (s?.job === targetJob) list.push({ text: `\`${nickPrefix}[${s.level}_${s.job}]\`（${s.ign}）- <@${m.userId}> [本尊: \`${m.mainIgn}\`]${retiredTag}`, lv: parseInt(s.level) || 0 });
     });
   });
   list.sort((a, b) => b.lv - a.lv);
@@ -890,7 +894,9 @@ client.once(Events.ClientReady, async () => {
       const channel = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
       if (!channel?.isTextBased()) return;
       if (db) {
-        const snap = await db.collection('member_profiles').where('mainLevel', '==', '199').where('isRetired', '==', false).get();
+        // 只用 mainLevel 篩選。原本多帶 where('isRetired','==',false)，但 Firestore 的
+        // == false 要求欄位存在，沒寫過這欄位的人會被整個漏掉，等於收不到倒數推播。
+        const snap = await db.collection('member_profiles').where('mainLevel', '==', '199').get();
         if (!snap.empty) {
           const now = Date.now();
           const countdownTexts = [];
@@ -1239,7 +1245,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const registeredUids = new Set();
           snap.forEach(doc => {
             const data = doc.data();
-            if (!data.isRetired) registeredUids.add(doc.id);
+            if (data.mainIgn) registeredUids.add(doc.id); // 退休者仍是已報到的成員
           });
 
           const members = await interaction.guild.members.fetch();
@@ -1274,6 +1280,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             targetUserId: targetUser.id,
             step: 'MAIN',
             nickname: targetUser.username,
+            isRetired: false,
             main: { ign: '', job: '黑騎士', level: '120' },
             subs: [],
             currentSub: null
@@ -1328,22 +1335,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const d = await fetchUserDocSafe(interaction.user.id);
           if (!d.mainIgn) return interaction.editReply('📜 您尚未建立名冊資料，請透過 `/角色_報到與更新` 登記。');
 
-          const subList = (d.subs || []).map((s, i) => `${i + 1}. \`${s.ign}\` (${s.job} Lv.${s.level})`).join('\n') || '無';
-
-          const isWarden = parseInt(d.mainLevel) >= 200;
-          const embed = new EmbedBuilder().setColor(d.isRetired ? 0x95A5A6 : (isWarden ? 0xF1C40F : 0x3498DB))
-            .setTitle(`🪪 冒險家名片 - ${d.nickname ? `[${d.nickname}] ` : ''}${d.mainIgn} ${isWarden ? '👑 [Lv.200 典獄長]' : ''}`)
-            .addFields(
-              { name: '👑 本尊角色', value: `${d.mainJob} (Lv.${d.mainLevel})`, inline: true },
-              { name: `⚔️ 分身角色 (${(d.subs || []).length} 隻)`, value: subList, inline: false }
-            );
-
-          const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('card_btn_add_char').setLabel('➕ 新增分身').setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setCustomId('card_btn_update_level').setLabel('🆙 更新等級').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId('card_btn_delete_char').setLabel('🗑️ 刪除分身').setStyle(ButtonStyle.Danger)
-          );
-          return await interaction.editReply({ embeds: [embed], components: [row] });
+          return await interaction.editReply(buildMyCardPayload(d));
         }
 
         if (mode === 'CARD_ROSTER') {
@@ -1434,6 +1426,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             level: prev.mainLevel || '120'
           },
           subs: dedupeSubs(prev.subs, prev.mainIgn),
+          isRetired: !!prev.isRetired,
           currentSub: null
         });
 
@@ -1444,6 +1437,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_level').setLabel('本尊等級 (必填)').setValue(prev.mainLevel || '120').setStyle(TextInputStyle.Short).setRequired(true))
         );
         return await interaction.showModal(modal);
+      }
+
+      if (customId === 'wiz_btn_retire') {
+        const session = wizardSessionMap.get(interaction.user.id);
+        if (!session) return interaction.reply({ content: '❌ 報到已逾時，請重新點擊報到！', flags: MessageFlags.Ephemeral });
+        session.isRetired = !session.isRetired;
+        return await interaction.update(buildWizardConfigCard(interaction.user.id));
       }
 
       if (customId === 'wiz_btn_add_sub') {
@@ -1488,14 +1488,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
             nickname,
             mainIgn, mainJob, mainLevel,
             subs: validSubs,
-            isRetired: false,
+            isRetired: !!session.isRetired,
             timestamp: admin.firestore.FieldValue.serverTimestamp()
           });
 
         }
 
         await syncMemberRoles(interaction.guild, targetUid, {
-          mainJob, mainLevel, subs: validSubs
+          mainJob, mainLevel, subs: validSubs, isRetired: !!session.isRetired
         });
 
         try {
@@ -1923,6 +1923,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.reply({ content: '📜 您還沒有名冊資料，請先用 `/角色_報到與更新` 完成報到！', flags: MessageFlags.Ephemeral });
         }
         return await interaction.showModal(buildBatchLevelModal(interaction.user.id, profile));
+      }
+
+      // 成員自助切換退休狀態
+      if (customId === 'card_btn_retire') {
+        await interaction.deferUpdate();
+        const prof = await fetchUserDocSafe(interaction.user.id);
+        if (!prof.mainIgn) {
+          return await interaction.followUp({ content: '❌ 您尚未建立名冊資料。', flags: MessageFlags.Ephemeral });
+        }
+        const nowRetired = !prof.isRetired;
+        await db.collection('member_profiles').doc(interaction.user.id).set(
+          { userId: interaction.user.id, isRetired: nowRetired }, { merge: true }
+        );
+        const merged = { ...prof, isRetired: nowRetired };
+        await syncMemberRoles(interaction.guild, interaction.user.id, merged);
+        await interaction.editReply(buildMyCardPayload(merged));
+        return await interaction.followUp({
+          content: nowRetired
+            ? '🚪 已幫你加上 **退休** 身分組。原本的職業身分組與名冊紀錄都保留著，名冊上會標示「已退休」，之後就不會有人約你打王了。'
+            : '🔄 歡迎回鍋！退休身分組已移除，其他身分組本來就沒動過。',
+          flags: MessageFlags.Ephemeral
+        });
       }
 
       if (customId === 'card_btn_delete_char') {
@@ -3097,6 +3119,35 @@ async function refreshMapMessage(mapId, mapData) {
 // ==========================================
 // 等級批次更新：一張表單改完名下所有角色
 // ==========================================
+
+// 個人名片（含退休狀態與自助切換鈕）
+function buildMyCardPayload(d) {
+  const subList = (d.subs || []).map((x, i) => `${i + 1}. \`${x.ign}\` (${x.job} Lv.${x.level})`).join('\n') || '無';
+  const isWarden = parseInt(d.mainLevel) >= 200;
+  const retired = !!d.isRetired;
+
+  const embed = new EmbedBuilder()
+    .setColor(retired ? 0x95A5A6 : (isWarden ? 0xF1C40F : 0x3498DB))
+    .setTitle(`🪪 冒險家名片 - ${d.nickname ? `[${d.nickname}] ` : ''}${d.mainIgn} ${isWarden ? '👑 [Lv.200 典獄長]' : ''}`)
+    .addFields(
+      { name: '👑 本尊角色', value: `${d.mainJob} (Lv.${d.mainLevel})`, inline: true },
+      { name: '📌 目前狀態', value: retired ? '🚪 已退休' : '🟢 現役中', inline: true },
+      { name: `⚔️ 分身角色 (${(d.subs || []).length} 隻)`, value: subList, inline: false }
+    );
+  if (retired) {
+    embed.setFooter({ text: '退休只是個標記：職業身分組與名冊紀錄都保留著，想回鍋隨時點「🔄 我回來了」。' });
+  }
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('card_btn_add_char').setLabel('➕ 新增分身').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('card_btn_update_level').setLabel('🆙 更新等級').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('card_btn_delete_char').setLabel('🗑️ 刪除分身').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('card_btn_retire')
+      .setLabel(retired ? '🔄 我回來了 (解除退休)' : '🚪 我要退休')
+      .setStyle(retired ? ButtonStyle.Success : ButtonStyle.Secondary)
+  );
+  return { embeds: [embed], components: [row] };
+}
 
 // 同一個遊戲 ID 只保留一筆：後填的覆蓋先填的，並排除與本尊同名的分身。
 // 報到精靈每次都是往 subs 後面 push，沒有這道防線就會越積越多重複。

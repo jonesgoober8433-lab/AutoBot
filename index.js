@@ -1625,7 +1625,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(modal);
       }
 
-      // 6-A. 隊長加人：從伺服器成員直接拉進團
+      // 6-A. 隊長加人 步驟 1：先選人（一次一位，下一步才挑他要上哪幾隻）
       if (customId.startsWith('party_add_member_')) {
         const pId = customId.replace('party_add_member_', '');
         const doc = await db.collection('party_trainings').doc(pId).get();
@@ -1635,10 +1635,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         const row = new ActionRowBuilder().addComponents(
           new UserSelectMenuBuilder().setCustomId(`party_pick_user_${pId}`)
-            .setPlaceholder('👥 選擇要加入隊伍的成員（可多選）').setMinValues(1).setMaxValues(10)
+            .setPlaceholder('👥 先選要加入的成員（一次一位）').setMinValues(1).setMaxValues(1)
         );
         return await interaction.reply({
-          content: '👉 **【隊長加人】選好成員後，機器人會自動把他名冊裡的本尊角色加進隊伍：**',
+          content: '👉 **【隊長加人 · 第 1 步】選一位成員，下一步再挑他要上哪幾隻角色：**',
           components: [row], flags: MessageFlags.Ephemeral
         });
       }
@@ -2166,47 +2166,106 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.update(buildWizardConfigCard(interaction.user.id));
       }
 
-      // 7-A. 隊長加人：選好成員後代為報名
+      // 7-A. 隊長加人 步驟 2：列出該成員名下所有角色，讓隊長挑要上哪幾隻
       if (customId.startsWith('party_pick_user_')) {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        await interaction.deferUpdate();
         const pId = customId.replace('party_pick_user_', '');
+        const uid = interaction.values[0];
+        const doc = await db.collection('party_trainings').doc(pId).get();
+        if (!doc.exists) return interaction.editReply({ content: '❌ 揪團不存在。', components: [] });
+        const pData = doc.data();
+        if (!isPartyLeader(pData, interaction)) {
+          return interaction.editReply({ content: '❌ 只有隊長或管理員可以直接加人！', components: [] });
+        }
+        if (pData.isClosed) return interaction.editReply({ content: '🔒 此揪團已關閉招募！', components: [] });
+
+        const prof = await fetchUserDocSafe(uid);
+        const chars = listCharacters(prof);
+        if (!chars.length) {
+          return interaction.editReply({
+            content: `❌ <@${uid}> 名冊裡還沒有任何角色，請先請他用 \`/角色_報到與更新\` 完成報到，才能被加進隊伍。`,
+            components: []
+          });
+        }
+
+        const joined = new Set((pData.members || [])
+          .filter(m => m.userId === uid)
+          .map(m => (m.ign || '').toLowerCase()));
+
+        const options = chars.slice(0, 25).map(c =>
+          new StringSelectMenuOptionBuilder()
+            .setLabel(`${c.isMain ? '👑 本尊' : '⚔️ 分身'}：${c.ign}`.substring(0, 100))
+            .setDescription(`${c.job} Lv.${c.level}${joined.has(c.ign.toLowerCase()) ? '　(已在隊上)' : ''}`.substring(0, 100))
+            .setValue(c.isMain ? 'main' : `sub_${c.idx}`)
+        );
+
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId(`party_pick_char_${pId}_${uid}`)
+            .setPlaceholder('⚔️ 選擇他要上的角色（可複選）')
+            .setMinValues(1).setMaxValues(options.length)
+            .addOptions(options)
+        );
+        return await interaction.editReply({
+          content: `👉 **【隊長加人 · 第 2 步】<@${uid}> 名下共 ${chars.length} 隻角色，請挑這次要上的：**`,
+          components: [row]
+        });
+      }
+
+      // 7-A2. 隊長加人 步驟 3：把選定的角色加進隊伍
+      if (customId.startsWith('party_pick_char_')) {
+        await interaction.deferUpdate();
+        const rest = customId.replace('party_pick_char_', '');
+        const cut = rest.lastIndexOf('_');
+        const pId = rest.slice(0, cut);
+        const uid = rest.slice(cut + 1);
+
         const ref = db.collection('party_trainings').doc(pId);
         const doc = await ref.get();
-        if (!doc.exists) return interaction.editReply('❌ 揪團不存在。');
+        if (!doc.exists) return interaction.editReply({ content: '❌ 揪團不存在。', components: [] });
         const pData = doc.data();
-        if (!isPartyLeader(pData, interaction)) return interaction.editReply('❌ 只有隊長或管理員可以直接加人！');
-        if (pData.isClosed) return interaction.editReply('🔒 此揪團已關閉招募！');
+        if (!isPartyLeader(pData, interaction)) {
+          return interaction.editReply({ content: '❌ 只有隊長或管理員可以直接加人！', components: [] });
+        }
+        if (pData.isClosed) return interaction.editReply({ content: '🔒 此揪團已關閉招募！', components: [] });
 
+        const prof = await fetchUserDocSafe(uid);
+        const chars = listCharacters(prof);
         const members = pData.members || [];
-        const added = [], skippedNoProfile = [], skippedDup = [];
+        const added = [], dup = [];
         let full = false;
 
-        for (const uid of interaction.values) {
+        for (const val of interaction.values) {
+          const c = val === 'main'
+            ? chars.find(x => x.isMain)
+            : chars.find(x => !x.isMain && String(x.idx) === val.replace('sub_', ''));
+          if (!c) continue;
+          if (members.some(m => m.userId === uid && (m.ign || '').toLowerCase() === c.ign.toLowerCase())) {
+            dup.push(c.ign); continue;
+          }
           if (members.length >= pData.maxCount) { full = true; break; }
-          const prof = await fetchUserDocSafe(uid);
-          if (!prof.mainIgn) { skippedNoProfile.push(uid); continue; }
-          if (members.some(m => m.userId === uid && m.ign.toLowerCase() === prof.mainIgn.toLowerCase())) {
-            skippedDup.push(uid); continue;
-          }
-          members.push({
-            userId: uid, ign: prof.mainIgn, job: prof.mainJob || '冒險家',
-            level: prof.mainLevel || '120', buffs: {}
-          });
-          added.push(uid);
-          const u = await client.users.fetch(uid).catch(() => null);
-          if (u) {
-            await u.send(`📣 **【已被加入隊伍】** 隊長 <@${interaction.user.id}> 把您的角色【**${prof.mainIgn}**】加進了 **【${pData.target}】**（${pData.date} ${pData.startTime}），記得準時到！`).catch(() => {});
-          }
+          members.push({ userId: uid, ign: c.ign, job: c.job, level: c.level, buffs: {} });
+          added.push(c);
         }
 
         await ref.update({ members });
         await refreshPartyMessage(pId, { ...pData, members }, members.length >= pData.maxCount);
 
-        let msg = added.length ? `✅ 已加入 ${added.length} 位：${added.map(u => `<@${u}>`).join('、')}（已私訊通知）` : '⚠️ 沒有任何人被加入。';
-        if (skippedDup.length) msg += `\n• 已在隊伍中，略過：${skippedDup.map(u => `<@${u}>`).join('、')}`;
-        if (skippedNoProfile.length) msg += `\n• 尚未報到建檔，無法加入：${skippedNoProfile.map(u => `<@${u}>`).join('、')}`;
+        if (added.length) {
+          const u = await client.users.fetch(uid).catch(() => null);
+          if (u) {
+            const list = added.map(c => `\`${c.ign}\`（${c.job} Lv.${c.level}）`).join('、');
+            await u.send(`📣 **【已被加入隊伍】** 隊長 <@${interaction.user.id}> 把你的 ${list} 加進了 **【${pData.target}】**（${pData.date} ${pData.startTime}），記得準時到！`).catch(() => {});
+          }
+        }
+
+        let msg = added.length
+          ? `✅ 已把 <@${uid}> 的 ${added.map(c => `\`${c.ign}\``).join('、')} 加進隊伍（已私訊通知本人）`
+          : '⚠️ 沒有任何角色被加入。';
+        if (dup.length) msg += `\n• 已在隊上，略過：${dup.map(x => '`' + x + '`').join('、')}`;
         if (full) msg += `\n• 隊伍已達上限 ${pData.maxCount} 人，其餘未加入。`;
-        return await interaction.editReply(msg);
+        msg += `\n\n要再加別人的話，回到面板再按一次「👥 隊長加人」。`;
+        return await interaction.editReply({ content: msg, components: [] });
       }
 
       // 7-B. 隊長踢人：執行移除

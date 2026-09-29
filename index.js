@@ -420,7 +420,11 @@ function buildWizardConfigCard(userId) {
       `🔹 **職業**：\`${char.job || '請在下方選單選擇'}\`\n` +
       `🔹 **等級**：\`Lv. ${char.level}\`\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
-      `💡 **請在下方選擇職業，完成後點擊「立即建檔」！**`
+      (session.subs.length
+        ? `📒 **已登記的分身（會一併保留）**：${session.subs.map(x => `\`${x.ign} Lv.${x.level}\``).join('、')}\n`
+        : '') +
+      `💡 **請在下方選擇職業，完成後點擊「立即建檔」！**\n` +
+      `🆙 *只是要改等級的話不用走這裡 —— 用 \`/個人名片\` 的「更新等級」一次改完更快。*`
     );
 
   return { embeds: [embed], components: [rowJob, rowBtns] };
@@ -774,7 +778,8 @@ const commands = [
         { name: '📖 說明手冊 (help) - 檢視目前所有管理員功能清單', value: 'ADMIN_HELP' },
         { name: '📝 代填/代更新成員名冊', value: 'ADMIN_PROXY_REGISTER' },
         { name: '👥 管理員代管專用控制台 (代添/代更/代刪)', value: 'ADMIN_ROSTER_PANEL' },
-        { name: '🔒 一鍵標記未報到成員為「未認證」', value: 'ADMIN_SET_UNVERIFIED_ALL' }
+        { name: '🔒 一鍵標記未報到成員為「未認證」', value: 'ADMIN_SET_UNVERIFIED_ALL' },
+        { name: '🧹 一鍵清理名冊中的重複角色 ID', value: 'ADMIN_DEDUPE_ALL' }
       )
     )
     .addUserOption(o => o.setName('對象成員').setDescription('代填名冊時選擇對象成員 (@成員)').setRequired(false))
@@ -926,9 +931,10 @@ client.once(Events.ClientReady, async () => {
         const embed = new EmbedBuilder()
           .setColor(0x5865F2)
           .setTitle('🔔【每週名冊維護】請大家更新角色資訊唷！')
-          .setDescription('點擊下方按鈕將**自動帶入您的舊資料**，快速調整等級，秒速完成更新！');
+          .setDescription('點擊下方按鈕將**自動帶入您所有角色的目前等級**，只要改數字就完成更新！\n新增／刪除角色請用 `/個人名片`。');
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('btn_trigger_wizard_main').setLabel('📝 快速更新名冊 (自動帶入舊資料)').setStyle(ButtonStyle.Success)
+          new ButtonBuilder().setCustomId('btn_batch_level_self').setLabel('🆙 一次更新所有角色等級').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId('btn_trigger_wizard_main').setLabel('📝 重新報到 / 加分身').setStyle(ButtonStyle.Secondary)
         );
         await ch.send({ embeds: [embed], components: [row] }).catch(() => {});
       }
@@ -1191,9 +1197,40 @@ client.on(Events.InteractionCreate, async (interaction) => {
               `1. 📝 **代填名冊** (\`/管理員功能 模式:代填名冊\`)\n` +
               `2. 👥 **代管控制台** (\`/管理員功能 模式:代管控制台\`)\n` +
               `3. 🔒 **一鍵標記未報到成員為未認證** (\`/管理員功能 模式:一鍵標記未認證\`)\n` +
-              `4. 🚪 **強制刪除揪團 / 廢除賭局**`
+              `4. 🧹 **一鍵清理重複角色 ID** (\`/管理員功能 模式:一鍵清理重複\`)\n` +
+              `5. 🚪 **強制刪除揪團 / 廢除賭局**`
             );
           return await interaction.reply({ embeds: [helpEmbed], flags: MessageFlags.Ephemeral });
+        }
+
+        if (mode === 'ADMIN_DEDUPE_ALL') {
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+          const snap = await db.collection('member_profiles').get();
+          let touched = 0, removed = 0;
+          const detail = [];
+
+          for (const docSnap of snap.docs) {
+            const d = docSnap.data();
+            const before = (d.subs || []).length;
+            const after = dedupeSubs(d.subs, d.mainIgn);
+            if (after.length === before) continue;
+            await db.collection('member_profiles').doc(docSnap.id).set({ subs: after }, { merge: true });
+            touched++; removed += (before - after.length);
+            if (detail.length < 15) {
+              detail.push(`• \`${d.nickname || d.mainIgn || docSnap.id}\`：${before} ➔ ${after.length} 隻（清掉 ${before - after.length} 筆）`);
+            }
+          }
+
+          if (!touched) return await interaction.editReply('✅ 掃描完成，名冊中沒有重複的角色 ID。');
+          const embed = new EmbedBuilder()
+            .setColor(0x57F287)
+            .setTitle('🧹【重複角色清理完成】')
+            .setDescription(
+              `共整理 **${touched}** 位成員，移除 **${removed}** 筆重複角色（同 ID 保留最新一筆）。\n` +
+              `━━━━━━━━━━━━━━━━━━━━\n` + detail.join('\n') +
+              (touched > detail.length ? `\n…其餘 ${touched - detail.length} 位未列出` : '')
+            );
+          return await interaction.editReply({ embeds: [embed] });
         }
 
         if (mode === 'ADMIN_SET_UNVERIFIED_ALL') {
@@ -1396,7 +1433,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             job: prev.mainJob || '黑騎士',
             level: prev.mainLevel || '120'
           },
-          subs: prev.subs || [],
+          subs: dedupeSubs(prev.subs, prev.mainIgn),
           currentSub: null
         });
 
@@ -1440,11 +1477,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const nickname = (session.nickname || interaction.user.username).trim();
         const targetUid = session.targetUserId || interaction.user.id;
 
-        const validSubs = (session.subs || []).filter(s => s && s.ign && s.ign.trim()).map(s => ({
-          ign: s.ign.trim(),
-          job: s.job || '主教',
-          level: (s.level || '120').replace(/[^0-9]/g, '') || '120'
-        }));
+        // 同 ID 覆蓋舊資料，避免每週報到一次就多存一筆重複角色
+        const rawSubs = (session.subs || []).filter(x => x && x.ign && x.ign.trim());
+        const validSubs = dedupeSubs(rawSubs, mainIgn);
+        const dedupedCount = rawSubs.length - validSubs.length;
 
         if (db) {
           await db.collection('member_profiles').doc(targetUid).set({
@@ -1481,7 +1517,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await publicChannel.send({ content: `<@${targetUid}>`, embeds: [publicEmbed] }).catch(() => {});
         }
 
-        return await interaction.editReply(`🎉 恭喜完成名冊建檔！成員 <@${targetUid}> 的本尊與 ${validSubs.length} 隻分身已全部獨立拆分建檔，身分組與伺服器暱稱已同步更新！`);
+        return await interaction.editReply(
+          `🎉 恭喜完成名冊建檔！成員 <@${targetUid}> 的本尊與 ${validSubs.length} 隻分身已建檔，身分組與伺服器暱稱已同步更新！` +
+          (dedupedCount > 0 ? `\n🧹 偵測到 **${dedupedCount}** 筆重複角色 ID，已自動以最新資料覆蓋。` : '')
+        );
       }
 
       // 3. 揪團報名入口
@@ -1870,22 +1909,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (customId === 'card_btn_update_level') {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const profile = await fetchUserDocSafe(interaction.user.id);
-        const chars = [];
-        if (profile.mainIgn) chars.push({ ign: profile.mainIgn, job: profile.mainJob, lv: profile.mainLevel, isMain: true });
-        (profile.subs || []).forEach(s => chars.push({ ign: s.ign, job: s.job, lv: s.level, isMain: false }));
+        if (!profile.mainIgn && !(profile.subs || []).length) {
+          return interaction.reply({ content: '❌ 您尚未登記任何角色，請先完成報到！', flags: MessageFlags.Ephemeral });
+        }
+        return await interaction.showModal(buildBatchLevelModal(interaction.user.id, profile));
+      }
 
-        if (!chars.length) return interaction.editReply('❌ 您尚未登記任何角色！');
-
-        userChoiceMap.set(`target_mod_user_${interaction.user.id}`, interaction.user.id);
-        const selectOptions = chars.slice(0, 25).map((c, i) =>
-          new StringSelectMenuOptionBuilder().setLabel(`${c.isMain ? '👑 本尊' : '⚔️ 分身'}：${c.ign} (${c.job} Lv.${c.lv})`.substring(0, 100)).setValue(`lvl_update_${interaction.user.id}_${i}_${c.ign}`)
-        );
-        const row = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder().setCustomId('select_char_to_update_level').setPlaceholder('🔽 請選擇要更新等級的角色').addOptions(selectOptions)
-        );
-        return await interaction.editReply({ content: '👉 **請選擇要升級/調整等級的角色：**', components: [row] });
+      // 週二名冊廣播：直接開批次表單，不用再跑一次報到流程
+      if (customId === 'btn_batch_level_self') {
+        const profile = await fetchUserDocSafe(interaction.user.id);
+        if (!profile.mainIgn && !(profile.subs || []).length) {
+          return interaction.reply({ content: '📜 您還沒有名冊資料，請先用 `/角色_報到與更新` 完成報到！', flags: MessageFlags.Ephemeral });
+        }
+        return await interaction.showModal(buildBatchLevelModal(interaction.user.id, profile));
       }
 
       if (customId === 'card_btn_delete_char') {
@@ -2006,6 +2043,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return await interaction.showModal(buildAddCharModal(targetUid));
         }
 
+        if (customId === 'admin_panel_lvl') {
+          const prof = await fetchUserDocSafe(targetUid);
+          if (!prof.mainIgn && !(prof.subs || []).length) {
+            return interaction.reply({ content: `❌ 成員 <@${targetUid}> 尚未登記任何角色！`, flags: MessageFlags.Ephemeral });
+          }
+          return await interaction.showModal(buildBatchLevelModal(targetUid, prof));
+        }
+
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         if (customId === 'admin_panel_retire') {
@@ -2018,17 +2063,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             : `🔄 已解除 <@${targetUid}> 的退休標記，職業身分組已依名冊重新發放。`);
         }
 
-        const mode = customId === 'admin_panel_lvl' ? 'UPDATE' : 'DELETE';
-        const row = await buildCharSelectRowForUser(targetUid, interaction.user.id, mode);
-        if (!row) {
-          return await interaction.editReply(mode === 'UPDATE'
-            ? `❌ 成員 <@${targetUid}> 尚未登記任何角色！`
-            : `❌ 成員 <@${targetUid}> 沒有可刪除的分身角色！`);
-        }
+        const row = await buildCharSelectRowForUser(targetUid, interaction.user.id);
+        if (!row) return await interaction.editReply(`❌ 成員 <@${targetUid}> 沒有可刪除的分身角色！`);
         return await interaction.editReply({
-          content: mode === 'UPDATE'
-            ? `👉 **【代更等級】請選擇 <@${targetUid}> 要調整的角色：**`
-            : `👉 **【代刪角色】請選擇 <@${targetUid}> 要刪除的分身：**`,
+          content: `👉 **【代刪角色】請選擇 <@${targetUid}> 要刪除的分身：**`,
           components: [row]
         });
       }
@@ -2301,32 +2339,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       // 10. 名片更新等級與刪除
-      if (customId === 'select_char_to_update_level') {
-        const val = interaction.values[0];
-        const parts = val.split('_');
-        let targetUid = userChoiceMap.get(`target_mod_user_${interaction.user.id}`) || interaction.user.id;
-        let charIdx = 0;
-        let ign = '';
-
-        if (parts.length >= 5) {
-          targetUid = parts[2];
-          charIdx = parseInt(parts[3]);
-          ign = parts.slice(4).join('_');
-        } else {
-          charIdx = parseInt(parts[2]);
-          ign = parts.slice(3).join('_');
-        }
-
-        userChoiceMap.set(`target_mod_user_${interaction.user.id}`, targetUid);
-        userChoiceMap.set(`target_mod_idx_${interaction.user.id}`, charIdx);
-
-        const modal = new ModalBuilder().setCustomId(`modal_card_set_level_${targetUid}_${charIdx}_${ign}`.substring(0, 100)).setTitle(`更新【${ign}】等級`.substring(0, 45));
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('new_level_input').setLabel('請輸入最新等級 (純數字)').setStyle(TextInputStyle.Short).setRequired(true))
-        );
-        return await interaction.showModal(modal);
-      }
-
       if (customId === 'select_char_to_delete') {
         const val = interaction.values[0];
         const parts = val.split('_');
@@ -2424,11 +2436,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
           return interaction.reply({ content: '❌ 僅超級管理員可使用！', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferUpdate();
         const targetUid = interaction.values[0];
-        const row = await buildCharSelectRowForUser(targetUid, interaction.user.id, 'UPDATE');
-        if (!row) return await interaction.editReply({ content: `❌ 成員 <@${targetUid}> 尚未登記任何角色！`, components: [] });
-        return await interaction.editReply({ content: `👉 **【代更等級】請選擇 <@${targetUid}> 要調整的角色：**`, components: [row] });
+        const prof = await fetchUserDocSafe(targetUid);
+        if (!prof.mainIgn && !(prof.subs || []).length) {
+          return interaction.reply({ content: `❌ 成員 <@${targetUid}> 尚未登記任何角色！`, flags: MessageFlags.Ephemeral });
+        }
+        return await interaction.showModal(buildBatchLevelModal(targetUid, prof));
       }
 
       // 15.【修復】管理員代刪角色：選定成員後列出其分身
@@ -2438,7 +2451,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         await interaction.deferUpdate();
         const targetUid = interaction.values[0];
-        const row = await buildCharSelectRowForUser(targetUid, interaction.user.id, 'DELETE');
+        const row = await buildCharSelectRowForUser(targetUid, interaction.user.id);
         if (!row) return await interaction.editReply({ content: `❌ 成員 <@${targetUid}> 沒有可刪除的分身角色！`, components: [] });
         return await interaction.editReply({ content: `👉 **【代刪角色】請選擇 <@${targetUid}> 要刪除的分身：**`, components: [row] });
       }
@@ -2839,58 +2852,97 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       // 12. 名片更新等級
-      if (customId.startsWith('modal_card_set_level_')) {
+      // 12. 一次更新所有角色等級
+      if (customId.startsWith('modal_batch_level_')) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const parts = customId.replace('modal_card_set_level_', '').split('_');
-        const targetUid = parts[0];
-        const charIdx = parseInt(parts[1]);
-        const ign = parts.slice(2).join('_');
-        const newLevel = interaction.fields.getTextInputValue('new_level_input').replace(/[^0-9]/g, '') || '1';
-        const profile = await fetchUserDocSafe(targetUid);
-        if (!profile.userId && !profile.mainIgn) return interaction.editReply('❌ 找不到該成員的名冊資料。');
-
-        let isMain = profile.mainIgn?.toLowerCase() === ign.toLowerCase();
-        let prevLevel = isMain ? profile.mainLevel : '1';
-
-        if (isMain) {
-          profile.mainLevel = newLevel;
-          if (newLevel === '199' && prevLevel !== '199') profile.reach199At = admin.firestore.FieldValue.serverTimestamp();
-          else if (newLevel !== '199') profile.reach199At = null;
-        } else {
-          if (!isNaN(charIdx) && profile.subs && profile.subs[charIdx]) {
-            prevLevel = profile.subs[charIdx].level;
-            profile.subs[charIdx].level = newLevel;
-          } else {
-            profile.subs = (profile.subs || []).map(s => {
-              if (s.ign.toLowerCase() === ign.toLowerCase()) {
-                prevLevel = s.level;
-                return { ...s, level: newLevel };
-              }
-              return s;
-            });
-          }
+        const targetUid = customId.replace('modal_batch_level_', '');
+        const isSelf = targetUid === interaction.user.id;
+        if (!isSelf && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.editReply('❌ 只能更新自己的角色等級！');
         }
 
-        await db.collection('member_profiles').doc(targetUid).set(profile, { merge: true });
-        await syncMemberRoles(interaction.guild, targetUid, profile);
+        const profile = await fetchUserDocSafe(targetUid);
+        if (!profile.mainIgn && !(profile.subs || []).length) {
+          return interaction.editReply('❌ 找不到名冊資料，請先完成報到。');
+        }
 
-        if (isMain) {
-          try {
-            const member = await interaction.guild.members.fetch(targetUid).catch(() => null);
-            if (member) {
-              const formattedNick = `${profile.nickname || ''}[${newLevel}_${profile.mainJob}]`.substring(0, 32);
-              await member.setNickname(formattedNick).catch(() => {});
-            }
-          } catch {}
+        const { rows, bad } = parseBatchLevels(interaction.fields.getTextInputValue('batch_levels'));
+        if (!rows.length) {
+          return interaction.editReply('❌ 沒有讀到任何一行有效資料。格式是每行一隻：`角色名=等級`');
+        }
 
+        const subs = (profile.subs || []).map(x => ({ ...x }));
+        const prevMainLevel = profile.mainLevel;
+        let mainNewLevel = null;
+        const changed = [], same = [], unknown = [];
+
+        for (const r of rows) {
+          const key = r.ign.toLowerCase();
+          if (profile.mainIgn && profile.mainIgn.toLowerCase() === key) {
+            if (String(profile.mainLevel) === r.level) { same.push(r.ign); continue; }
+            changed.push({ ign: profile.mainIgn, from: profile.mainLevel, to: r.level, isMain: true });
+            mainNewLevel = r.level;
+            continue;
+          }
+          const hit = subs.findIndex(x => (x.ign || '').toLowerCase() === key);
+          if (hit === -1) { unknown.push(r.ign); continue; }
+          if (String(subs[hit].level) === r.level) { same.push(subs[hit].ign); continue; }
+          changed.push({ ign: subs[hit].ign, from: subs[hit].level, to: r.level, isMain: false });
+          subs[hit].level = r.level;
+        }
+
+        if (!changed.length) {
+          let msg = '💡 沒有任何等級變動。';
+          if (unknown.length) msg += `\n⚠️ 名冊裡找不到這些角色：${unknown.map(x => '`' + x + '`').join('、')}`;
+          if (bad.length) msg += `\n⚠️ 這幾行看不懂：${bad.slice(0, 5).map(x => '`' + x + '`').join('、')}`;
+          return interaction.editReply(msg);
+        }
+
+        // 照原本的建檔方式寫回：里程碑、身分組、暱稱全部照舊
+        const payload = { userId: targetUid, subs: dedupeSubs(subs, profile.mainIgn) };
+        if (mainNewLevel !== null) {
+          payload.mainLevel = mainNewLevel;
+          if (mainNewLevel === '199' && String(prevMainLevel) !== '199') {
+            payload.reach199At = admin.firestore.FieldValue.serverTimestamp();
+          } else if (mainNewLevel !== '199') {
+            payload.reach199At = null;
+          }
+        }
+        await db.collection('member_profiles').doc(targetUid).set(payload, { merge: true });
+
+        const merged = { ...profile, ...payload, subs };
+        await syncMemberRoles(interaction.guild, targetUid, merged);
+
+        if (mainNewLevel !== null) {
+          const member = await interaction.guild.members.fetch(targetUid).catch(() => null);
+          if (member) {
+            const nick = `${profile.nickname || ''}[${mainNewLevel}_${profile.mainJob}]`.substring(0, 32);
+            await member.setNickname(nick).catch(() => {});
+          }
           const targetUser = await client.users.fetch(targetUid).catch(() => null);
           if (targetUser) {
-            const milestone = await checkLevelMilestone(interaction.guild, targetUser, prevLevel, newLevel, profile.mainIgn, profile.mainJob);
+            const milestone = await checkLevelMilestone(
+              interaction.guild, targetUser, prevMainLevel, mainNewLevel, profile.mainIgn, profile.mainJob
+            );
             if (milestone) await interaction.followUp({ embeds: [milestone], flags: MessageFlags.Ephemeral }).catch(() => {});
           }
         }
 
-        return await interaction.editReply(`🆙 角色【**${ign}**】等級已成功更新為 **Lv.${newLevel}**！`);
+        const lines = changed.map(c =>
+          `${c.isMain ? '👑' : '⚔️'} **${c.ign}**　Lv.${c.from} ➔ **Lv.${c.to}**`
+        ).join('\n');
+        const resultEmbed = new EmbedBuilder()
+          .setColor(0x57F287)
+          .setTitle(`🆙 已更新 ${changed.length} 隻角色的等級`)
+          .setDescription(
+            lines +
+            (same.length ? `\n━━━━━━━━━━━━━━━━━━━━\n⏸️ 未變動 ${same.length} 隻` : '') +
+            (unknown.length ? `\n⚠️ 名冊裡找不到：${unknown.map(x => '`' + x + '`').join('、')}` : '') +
+            (bad.length ? `\n⚠️ 看不懂的行：${bad.slice(0, 5).map(x => '`' + x + '`').join('、')}` : '')
+          )
+          .setFooter({ text: mainNewLevel !== null ? '本尊等級有變動，暱稱與身分組已同步' : '身分組已同步' });
+
+        return await interaction.editReply({ embeds: [resultEmbed] });
       }
 
       // 13. 名片新增分身 (含管理員代添)
@@ -3042,6 +3094,81 @@ async function refreshMapMessage(mapId, mapData) {
   } catch (e) { console.error('重繪放圖面板失敗:', e.message); }
 }
 
+// ==========================================
+// 等級批次更新：一張表單改完名下所有角色
+// ==========================================
+
+// 同一個遊戲 ID 只保留一筆：後填的覆蓋先填的，並排除與本尊同名的分身。
+// 報到精靈每次都是往 subs 後面 push，沒有這道防線就會越積越多重複。
+function dedupeSubs(subs, mainIgn) {
+  const byIgn = new Map();
+  const mainKey = (mainIgn || '').trim().toLowerCase();
+  (subs || []).forEach(sub => {
+    const ign = (sub?.ign || '').trim();
+    if (!ign) return;
+    const key = ign.toLowerCase();
+    if (mainKey && key === mainKey) return; // 分身跟本尊同名，視為同一隻
+    byIgn.set(key, {                        // Map.set 同鍵覆蓋 = 後者勝出
+      ign,
+      job: sub.job || '主教',
+      level: String(sub.level || '120').replace(/[^0-9]/g, '') || '120'
+    });
+  });
+  return Array.from(byIgn.values());
+}
+
+// 把名冊攤平成 [{ign, job, level, isMain, idx}]
+function listCharacters(profile) {
+  const out = [];
+  if (profile.mainIgn) {
+    out.push({ ign: profile.mainIgn, job: profile.mainJob || '冒險家', level: profile.mainLevel || '1', isMain: true, idx: -1 });
+  }
+  (profile.subs || []).forEach((sub, i) => {
+    if (sub?.ign) out.push({ ign: sub.ign, job: sub.job || '冒險家', level: sub.level || '1', isMain: false, idx: i });
+  });
+  return out;
+}
+
+// 建立「一次改完」的表單，舊等級直接預填好
+function buildBatchLevelModal(targetUid, profile) {
+  const chars = listCharacters(profile);
+  // Discord 單一欄位上限 4000 字，正常名冊遠遠用不到，仍做保險截斷
+  let body = chars.map(c => `${c.ign}=${c.level}`).join('\n');
+  if (body.length > 3900) body = body.slice(0, 3900);
+
+  const modal = new ModalBuilder()
+    .setCustomId(`modal_batch_level_${targetUid}`)
+    .setTitle('一次更新所有角色等級');
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('batch_levels')
+        .setLabel('每行一隻，只改等級數字')
+        .setValue(body)
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+    )
+  );
+  return modal;
+}
+
+// 解析「角色名=等級」，容忍 = ＝ : ： 與空白分隔
+function parseBatchLevels(raw) {
+  const rows = [], bad = [];
+  (raw || '').split(/\r?\n/).forEach(line => {
+    const t = line.trim();
+    if (!t) return;
+    let m = t.match(/^(.*)[=＝:：]\s*(\d{1,3})$/);      // 角色名可能含符號，抓最後一個分隔號
+    if (!m) m = t.match(/^(.+?)\s+(\d{1,3})$/);         // 也接受用空白分隔
+    if (!m) { bad.push(t); return; }
+    const ign = m[1].trim();
+    const lv = Math.min(200, Math.max(1, parseInt(m[2])));
+    if (!ign) { bad.push(t); return; }
+    rows.push({ ign, level: String(lv) });
+  });
+  return { rows, bad };
+}
+
 // 判斷是不是這團的隊長（或管理員）
 function isPartyLeader(pData, interaction) {
   return pData.creatorId === interaction.user.id ||
@@ -3088,37 +3215,26 @@ function buildAddCharModal(targetUid) {
   return modal;
 }
 
-// 為指定成員建立「角色選擇」下拉選單 (mode: UPDATE 含本尊 / DELETE 僅分身)
-async function buildCharSelectRowForUser(targetUid, operatorId, mode) {
+// 為指定成員建立「要刪除哪隻分身」的下拉選單（等級更新已改為批次表單）
+async function buildCharSelectRowForUser(targetUid, operatorId) {
   const profile = await fetchUserDocSafe(targetUid);
-  const chars = [];
-
-  if (mode === 'UPDATE' && profile.mainIgn) {
-    chars.push({ ign: profile.mainIgn, job: profile.mainJob, lv: profile.mainLevel, isMain: true, idx: -1 });
-  }
-  (profile.subs || []).forEach((s, i) => {
-    if (s?.ign) chars.push({ ign: s.ign, job: s.job, lv: s.level, isMain: false, idx: i });
-  });
+  const chars = (profile.subs || [])
+    .map((sub, i) => ({ ign: sub?.ign, job: sub?.job, lv: sub?.level, idx: i }))
+    .filter(c => c.ign);
 
   if (!chars.length) return null;
+  userChoiceMap.set(`target_del_user_${operatorId}`, targetUid);
 
-  if (mode === 'UPDATE') {
-    userChoiceMap.set(`target_mod_user_${operatorId}`, targetUid);
-  } else {
-    userChoiceMap.set(`target_del_user_${operatorId}`, targetUid);
-  }
-
-  const prefix = mode === 'UPDATE' ? 'lvl_update' : 'del_char';
   const options = chars.slice(0, 25).map(c =>
     new StringSelectMenuOptionBuilder()
-      .setLabel(`${c.isMain ? '👑 本尊' : '⚔️ 分身'}：${c.ign} (${c.job} Lv.${c.lv})`.substring(0, 100))
-      .setValue(`${prefix}_${targetUid}_${c.idx}_${c.ign}`.substring(0, 100))
+      .setLabel(`⚔️ 分身：${c.ign} (${c.job} Lv.${c.lv})`.substring(0, 100))
+      .setValue(`del_char_${targetUid}_${c.idx}_${c.ign}`.substring(0, 100))
   );
 
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
-      .setCustomId(mode === 'UPDATE' ? 'select_char_to_update_level' : 'select_char_to_delete')
-      .setPlaceholder(mode === 'UPDATE' ? '🔽 請選擇要更新等級的角色' : '⚠️ 請選擇欲刪除的分身角色')
+      .setCustomId('select_char_to_delete')
+      .setPlaceholder('⚠️ 請選擇欲刪除的分身角色')
       .addOptions(options)
   );
 }

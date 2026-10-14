@@ -346,18 +346,15 @@ async function syncMemberRoles(guild, userId, profileData) {
     const member = await guild.members.fetch(userId).catch(() => null);
     if (!member) return;
 
-    // 已退休：清掉所有職業身分組與已認證，只留退休標記
-    if (profileData.isRetired) {
-      const allJobIds = Object.values(ROLES.JOBS).filter(Boolean);
-      const strip = member.roles.cache.filter(r =>
-        allJobIds.includes(r.id) || r.id === ROLES.VERIFIED || r.id === ROLES.WARDEN_200
-      );
-      if (strip.size) await member.roles.remove(strip).catch(() => {});
-      if (ROLES.RETIRED) await member.roles.add(ROLES.RETIRED).catch(() => {});
-      return;
-    }
-    if (ROLES.RETIRED && member.roles.cache.has(ROLES.RETIRED)) {
-      await member.roles.remove(ROLES.RETIRED).catch(() => {});
+    // 退休只是「多一個標記」：職業身分組、已認證、Lv200 典獄長一律保留不動。
+    // 200 等不代表退休，很多人還在玩小號，所以不會因為等級自動被標記。
+    if (ROLES.RETIRED) {
+      const hasRetired = member.roles.cache.has(ROLES.RETIRED);
+      if (profileData.isRetired && !hasRetired) {
+        await member.roles.add(ROLES.RETIRED).catch(() => {});
+      } else if (!profileData.isRetired && hasRetired) {
+        await member.roles.remove(ROLES.RETIRED).catch(() => {});
+      }
     }
 
     const activeJobs = new Set();
@@ -710,7 +707,7 @@ function buildJobQueryMenu(isAdmin = false) {
 const commands = [
   new SlashCommandBuilder()
     .setName('名冊')
-    .setDescription('我的名片、報到登記、角色管理與成員名冊'),
+    .setDescription('我的名片、報到登記、突襲進度、角色管理與成員名冊'),
 
   new SlashCommandBuilder()
     .setName('升級試算')
@@ -762,7 +759,8 @@ const commands = [
         { name: '👥 管理員代管專用控制台 (代添/代更/代刪)', value: 'ADMIN_ROSTER_PANEL' },
         { name: '🔒 一鍵標記未報到成員為「未認證」', value: 'ADMIN_SET_UNVERIFIED_ALL' },
         { name: '🧹 一鍵清理名冊中的重複角色 ID', value: 'ADMIN_DEDUPE_ALL' },
-        { name: '📌 張貼公開的「報到登記面板」到本頻道', value: 'ADMIN_POST_REGISTER' }
+        { name: '📌 張貼公開的「報到登記面板」到本頻道', value: 'ADMIN_POST_REGISTER' },
+        { name: '⚔️ 查看全體成員的突襲王進度', value: 'ADMIN_RAID_OVERVIEW' }
       )
     )
     .addUserOption(o => o.setName('對象成員').setDescription('代填名冊時選擇對象成員 (@成員)').setRequired(false))
@@ -902,8 +900,14 @@ client.once(Events.ClientReady, async () => {
         const embed = new EmbedBuilder()
           .setColor(0xE74C3C)
           .setTitle('🔔【每週例行提醒】突襲遠征結算倒數')
-          .setDescription('週二即將進行維護/重置，請把握時間打完突襲王！');
-        await ch.send({ embeds: [embed] }).catch(() => {});
+          .setDescription(
+            '週二 08:00 維護後次數就歸零了，請把握時間打完突襲王！\n' +
+            '點下面的按鈕可以看**自己每一隻角色**還差幾次（只有你看得到）。'
+          );
+        const raidRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('btn_raid_self').setLabel('⚔️ 看我的突襲進度').setStyle(ButtonStyle.Primary)
+        );
+        await ch.send({ embeds: [embed], components: [raidRow] }).catch(() => {});
       }
     } catch (e) { console.error('週一廣播異常:', e.message); }
   }, { timezone: 'Asia/Taipei' });
@@ -1171,7 +1175,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
               `3. 🔒 **一鍵標記未報到成員為未認證** (\`/管理員功能 模式:一鍵標記未認證\`)\n` +
               `4. 🧹 **一鍵清理重複角色 ID** (\`/管理員功能 模式:一鍵清理重複\`)\n` +
               `5. 📌 **張貼公開的報到登記面板** (\`/管理員功能 模式:張貼報到面板\`)\n` +
-              `6. 🚪 **強制刪除揪團 / 廢除賭局**`
+              `6. ⚔️ **查看全體突襲王進度** (\`/管理員功能 模式:全體突襲進度\`)\n` +
+              `7. 🚪 **強制刪除揪團 / 廢除賭局**`
             );
           return await interaction.reply({ embeds: [helpEmbed], flags: MessageFlags.Ephemeral });
         }
@@ -1237,6 +1242,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
 
           return await interaction.editReply(`🔒 **一鍵標記完成！** 已成功為伺服器內 **${count}** 位尚未完成報到的成員添加【未認證】身分組！`);
+        }
+
+        if (mode === 'ADMIN_RAID_OVERVIEW') {
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+          return await interaction.editReply(await buildRaidAdminOverview());
         }
 
         if (mode === 'ADMIN_ROSTER_PANEL') {
@@ -1851,6 +1861,52 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(buildBatchLevelModal(interaction.user.id, profile));
       }
 
+      // 突襲王進度：誰按誰看自己的，廣播上的按鈕也走同一條路
+      if (customId === 'card_btn_raid' || customId === 'btn_raid_self') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const profile = await fetchUserDocSafe(interaction.user.id);
+        if (!profile.mainIgn && !(profile.subs || []).length) {
+          return await interaction.editReply('📜 您還沒有名冊資料，請先用 \`/名冊\` 完成報到！');
+        }
+        return await interaction.editReply(buildRaidPayload(
+          profile, profile.nickname || profile.mainIgn,
+          { isAdmin: isSuperAdmin(interaction.user.id, interaction.memberPermissions) }
+        ));
+      }
+
+      if (customId === 'raid_btn_update') {
+        const profile = await fetchUserDocSafe(interaction.user.id);
+        if (!getRaidState(profile).length) {
+          return interaction.reply({ content: '❌ 名冊裡沒有角色，無法更新。', flags: MessageFlags.Ephemeral });
+        }
+        return await interaction.showModal(buildRaidModal(interaction.user.id, profile));
+      }
+
+      if (customId === 'raid_btn_allfull' || customId === 'raid_btn_reset') {
+        await interaction.deferUpdate();
+        const profile = await fetchUserDocSafe(interaction.user.id);
+        const rows = getRaidState(profile);
+        if (!rows.length) {
+          return await interaction.followUp({ content: '❌ 名冊裡沒有角色。', flags: MessageFlags.Ephemeral });
+        }
+        const toFull = customId === 'raid_btn_allfull';
+        rows.forEach(c => { c.used = toFull ? c.cap : 0; });
+        await saveRaidState(interaction.user.id, rows);
+        const merged = { ...profile, raid: { weekKey: raidWeekKey(), chars: raidCharsMap(rows) } };
+        return await interaction.editReply(buildRaidPayload(
+          merged, profile.nickname || profile.mainIgn,
+          { isAdmin: isSuperAdmin(interaction.user.id, interaction.memberPermissions) }
+        ));
+      }
+
+      if (customId === 'raid_btn_admin_all') {
+        if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.reply({ content: '❌ 僅超級管理員可使用！', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        return await interaction.editReply(await buildRaidAdminOverview());
+      }
+
       // 成員名冊（從名片面板點進來，公開發到頻道讓大家都看得到）
       if (customId === 'card_btn_roster') {
         await interaction.deferReply();
@@ -2025,8 +2081,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await db.collection('member_profiles').doc(targetUid).set({ userId: targetUid, isRetired: nowRetired }, { merge: true });
           await syncMemberRoles(interaction.guild, targetUid, { ...profile, isRetired: nowRetired });
           return await interaction.editReply(nowRetired
-            ? `🚪 已將 <@${targetUid}> 標記為【退休】，職業身分組已全部清除，名冊查詢不再顯示其角色。`
-            : `🔄 已解除 <@${targetUid}> 的退休標記，職業身分組已依名冊重新發放。`);
+            ? `🚪 已幫 <@${targetUid}> 加上【退休】身分組。原本的職業身分組與名冊紀錄都保留著，名冊上只會多標示「已退休」。`
+            : `🔄 已解除 <@${targetUid}> 的退休標記，其他身分組本來就沒動過。`);
         }
 
         const row = await buildCharSelectRowForUser(targetUid, interaction.user.id);
@@ -2058,6 +2114,51 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ----------------------------------------
     if (interaction.isStringSelectMenu() || interaction.isUserSelectMenu()) {
       const customId = interaction.customId;
+
+      // 快速登記：選到哪隻就幫那隻加次數，加完直接刷新同一個面板
+      if (customId === 'raid_sel_plus1' || customId === 'raid_sel_plus7') {
+        await interaction.deferUpdate();
+        const step = customId === 'raid_sel_plus7' ? RAID_FREE_CAP : 1;
+        const profile = await fetchUserDocSafe(interaction.user.id);
+        const rows = getRaidState(profile);
+        const target = rows.find(c => c.ign === interaction.values[0]);
+        if (!target) {
+          return await interaction.followUp({ content: '❌ 這隻角色已經不在名冊裡了，請重新開啟面板。', flags: MessageFlags.Ephemeral });
+        }
+        const from = target.used;
+        target.used = Math.min(target.used + step, target.cap);   // 加到上限就停住
+        if (target.used === from) {
+          return await interaction.followUp({ content: `💡 **${target.ign}** 本週已經打滿 ${target.cap} 次了。`, flags: MessageFlags.Ephemeral });
+        }
+        await saveRaidState(interaction.user.id, rows);
+        const merged = { ...profile, raid: { weekKey: raidWeekKey(), chars: raidCharsMap(rows) } };
+        await interaction.editReply(buildRaidPayload(
+          merged, profile.nickname || profile.mainIgn,
+          { isAdmin: isSuperAdmin(interaction.user.id, interaction.memberPermissions) }
+        ));
+        return await interaction.followUp({
+          content: `⚔️ **${target.ign}** 記上了：\`${from} ➔ ${target.used} / ${target.cap} 次\``
+            + (target.used >= target.cap ? '　✅ 這隻打滿了！' : `　還差 ${target.cap - target.used} 次`),
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      // 管理員從全體總覽挑一個人看明細（唯讀，不給操作鈕免得改到別人的）
+      if (customId === 'admin_raid_pick_user') {
+        if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.reply({ content: '❌ 僅超級管理員可使用！', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const targetUid = interaction.values[0];
+        const profile = await fetchUserDocSafe(targetUid);
+        if (!profile.mainIgn && !(profile.subs || []).length) {
+          return await interaction.editReply(`📜 <@${targetUid}> 還沒有名冊資料。`);
+        }
+        return await interaction.editReply({
+          content: `👥 <@${targetUid}> 的本週突襲進度：`,
+          ...buildRaidPayload(profile, profile.nickname || profile.mainIgn, { readonly: true })
+        });
+      }
 
       // 1. 從揪團清單調出面板
       if (customId === 'select_view_party_panel') {
@@ -2837,6 +2938,57 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // 12. 名片更新等級
       // 12. 一次更新所有角色等級
+      if (customId.startsWith('modal_raid_batch_')) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const targetUid = customId.replace('modal_raid_batch_', '');
+        if (targetUid !== interaction.user.id && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.editReply('❌ 只能更新自己的突襲次數！');
+        }
+
+        const profile = await fetchUserDocSafe(targetUid);
+        const current = getRaidState(profile);
+        if (!current.length) return interaction.editReply('❌ 找不到名冊資料，請先完成報到。');
+
+        const { rows, bad } = parseRaidBatch(interaction.fields.getTextInputValue('raid_rows'));
+        if (!rows.length) {
+          return interaction.editReply('❌ 沒有讀到任何一行有效資料。格式是每行一隻：\`角色=已用/上限\`');
+        }
+
+        const byKey = new Map(current.map(c => [c.ign.toLowerCase(), c]));
+        const changed = [], unknown = [];
+        for (const r of rows) {
+          const hit = byKey.get(r.ign.toLowerCase());
+          if (!hit) { unknown.push(r.ign); continue; }
+          // 上限只有 7（免費）與 14（吃卷）兩種，填超過 7 就當作吃了突襲卷
+          const cap = r.cap === null ? hit.cap : (r.cap > RAID_FREE_CAP ? RAID_SCROLL_CAP : RAID_FREE_CAP);
+          const used = Math.min(Math.max(r.used, 0), cap);
+          if (used === hit.used && cap === hit.cap) continue;
+          changed.push(`• **${hit.ign}**：\`${hit.used}/${hit.cap}\` ➔ \`${used}/${cap}\``);
+          hit.used = used; hit.cap = cap;
+        }
+
+        if (!changed.length) {
+          let msg = '💡 本週突襲次數沒有變動。';
+          if (unknown.length) msg += `\n⚠️ 名冊裡找不到這些角色：${unknown.map(x => '\`' + x + '\`').join('、')}`;
+          if (bad.length) msg += `\n⚠️ 這幾行看不懂：${bad.slice(0, 5).map(x => '\`' + x + '\`').join('、')}`;
+          return interaction.editReply(msg);
+        }
+
+        await saveRaidState(targetUid, current);
+        const merged = { ...profile, raid: { weekKey: raidWeekKey(), chars: raidCharsMap(current) } };
+
+        let note = `⚔️ 已更新 **${changed.length}** 隻角色的突襲進度：\n${changed.slice(0, 12).join('\n')}`;
+        if (changed.length > 12) note += `\n…其餘 ${changed.length - 12} 隻`;
+        if (unknown.length) note += `\n⚠️ 名冊裡找不到：${unknown.map(x => '\`' + x + '\`').join('、')}`;
+        if (bad.length) note += `\n⚠️ 這幾行看不懂：${bad.slice(0, 5).map(x => '\`' + x + '\`').join('、')}`;
+
+        return interaction.editReply({
+          content: note.slice(0, 1900),
+          ...buildRaidPayload(merged, profile.nickname || profile.mainIgn,
+            { isAdmin: isSuperAdmin(interaction.user.id, interaction.memberPermissions) })
+        });
+      }
+
       if (customId.startsWith('modal_batch_level_')) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const targetUid = customId.replace('modal_batch_level_', '');
@@ -3176,6 +3328,7 @@ function buildMyCardPayload(d) {
     new ButtonBuilder().setCustomId('card_btn_delete_char').setLabel('🗑️ 刪除分身').setStyle(ButtonStyle.Danger)
   );
   const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('card_btn_raid').setLabel('⚔️ 突襲進度').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('card_btn_roster').setLabel('📋 成員名冊').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('card_btn_retire')
       .setLabel(retired ? '🔄 我回來了 (解除退休)' : '🚪 我要退休')
@@ -3253,6 +3406,254 @@ function parseBatchLevels(raw) {
     rows.push({ ign, level: String(lv) });
   });
   return { rows, bad };
+}
+
+// ===================== 突襲王進度 =====================
+const RAID_FREE_CAP = 7;      // 每週免費進入次數
+const RAID_SCROLL_CAP = 14;   // 吃了突襲卷：7（免費）+ 7（突襲）
+const RAID_RESET_HOUR = 8;    // 每週二 08:00（台北）維護後重置
+
+// 一週的界線 =（台北時間）週二 RAID_RESET_HOUR:00
+function raidWeekRange(nowMs = Date.now()) {
+  const tpe = new Date(nowMs + TPE_OFFSET_MS);
+  const todayReset = tpeWallClockToMs(
+    tpe.getUTCFullYear(), tpe.getUTCMonth() + 1, tpe.getUTCDate(), RAID_RESET_HOUR, 0
+  );
+  let back = (tpe.getUTCDay() - 2 + 7) % 7;        // 週二=0、週三=1 …… 週一=6
+  if (back === 0 && nowMs < todayReset) back = 7;  // 還是週二但沒到 08:00 → 仍算上一週
+  const startMs = todayReset - back * 86400000;    // 台灣無日光節約，直接減整天
+  return { startMs, endMs: startMs + 7 * 86400000 };
+}
+
+function raidWeekKey(nowMs = Date.now()) {
+  const d = new Date(raidWeekRange(nowMs).startMs + TPE_OFFSET_MS);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+function raidMd(ms) {
+  const d = new Date(ms + TPE_OFFSET_MS);
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+}
+
+// 名冊 + 本週紀錄合成狀態。跨週的舊紀錄自動視為 0，所以不需要排程歸零，也永遠不會漏跑。
+function getRaidState(profile, nowMs = Date.now()) {
+  const stored = profile.raid || {};
+  const chars = stored.weekKey === raidWeekKey(nowMs) ? (stored.chars || {}) : {};
+  const seen = new Set();
+  const out = [];
+  listCharacters(profile).forEach(c => {
+    // 舊資料可能有「分身與本尊同名」的殘留，同名只算一隻：
+    // 不然次數會被重複計算，選單也會出現重複的 value 讓 Discord 退掉整個訊息。
+    const key = (c.ign || '').trim().toLowerCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    const rec = chars[c.ign] || {};
+    const cap = (parseInt(rec.cap) || 0) > RAID_FREE_CAP ? RAID_SCROLL_CAP : RAID_FREE_CAP;
+    const used = Math.min(Math.max(parseInt(rec.used) || 0, 0), cap);
+    out.push({ ign: c.ign, job: c.job, level: c.level, isMain: c.isMain, used, cap });
+  });
+  return out;
+}
+
+// 四種狀態：❗還沒打 / 🔸還差 N 次 / 🎫吃卷中 / ✅已打滿。rank 用來把沒打的排到最前面。
+function raidRowInfo(c) {
+  const left = c.cap - c.used;
+  const scroll = c.cap === RAID_SCROLL_CAP;
+  if (left <= 0) return { icon: '✅', rank: 2, note: '' };
+  if (c.used === 0) return { icon: '❗', rank: 0, note: scroll ? `還差 ${left} 次（吃卷）` : '' };
+  return { icon: scroll ? '🎫' : '🔸', rank: 1, note: `還差 ${left} 次${scroll ? '（吃卷）' : ''}` };
+}
+
+function raidSummary(rows) {
+  return {
+    used: rows.reduce((a, c) => a + c.used, 0),
+    cap: rows.reduce((a, c) => a + c.cap, 0),
+    untouched: rows.filter(c => c.used === 0).length,
+    done: rows.filter(c => c.used >= c.cap).length,
+    total: rows.length
+  };
+}
+
+function raidCharsMap(rows) {
+  const out = {};
+  rows.forEach(c => { out[c.ign] = { used: c.used, cap: c.cap }; });
+  return out;
+}
+
+// 用 update 整塊覆蓋 raid 欄位，改過名字的舊角色不會殘留
+async function saveRaidState(targetUid, rows, nowMs = Date.now()) {
+  if (!db) return;
+  const raid = { weekKey: raidWeekKey(nowMs), chars: raidCharsMap(rows), updatedAt: Date.now() };
+  const ref = db.collection('member_profiles').doc(targetUid);
+  try { await ref.update({ raid }); }
+  catch { await ref.set({ userId: targetUid, raid }, { merge: true }); }
+}
+
+function buildRaidPayload(profile, displayName, opts = {}) {
+  const nowMs = opts.nowMs || Date.now();
+  const rows = getRaidState(profile, nowMs);
+  const { startMs, endMs } = raidWeekRange(nowMs);
+
+  if (!rows.length) {
+    return {
+      embeds: [new EmbedBuilder().setColor(0x95A5A6).setTitle('⚔️ 突襲王進度')
+        .setDescription('名冊裡還沒有角色，先用 \`/名冊\` 完成報到吧！')],
+      components: []
+    };
+  }
+
+  // 還沒打的排最前面，角色多的人一眼就看到該補哪隻
+  const sorted = rows.map(c => ({ c, i: raidRowInfo(c) })).sort((a, b) => a.i.rank - b.i.rank);
+  const lines = sorted.map(({ c, i }) =>
+    `${i.icon} **${c.ign}**　${c.job} Lv.${c.level}　\`${c.used} / ${c.cap} 次\`${i.note ? `　${i.note}` : ''}`
+  );
+
+  const s = raidSummary(rows);
+  let desc = lines.join('\n');
+  if (desc.length > 3400) desc = desc.slice(0, 3400) + '\n…（角色太多，先列到這裡）';
+  desc += '\n━━━━━━━━━━━━━━━━━━━━\n'
+    + `總計 **${s.used} / ${s.cap} 次**　‧　`
+    + (s.untouched ? `還有 **${s.untouched}** 隻完全沒打` : '每隻都開工了 👍')
+    + `\n⏳ 距離重置：<t:${Math.floor(endMs / 1000)}:R>（週二 ${String(RAID_RESET_HOUR).padStart(2, '0')}:00 維護後歸零）`;
+
+  const embed = new EmbedBuilder()
+    .setColor(s.untouched ? 0xE67E22 : (s.done === s.total ? 0x57F287 : 0x5865F2))
+    .setTitle(`⚔️ 突襲王進度${displayName ? ` - ${displayName}` : ''}`)
+    .setDescription(desc)
+    .setFooter({ text: `本週 ${raidMd(startMs)} ~ ${raidMd(endMs)}　‧　❗沒打　🔸還差　🎫吃卷中　✅打滿` });
+
+  const components = [];
+  if (!opts.readonly) {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('raid_btn_update').setLabel('📝 批次更新').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('raid_btn_allfull').setLabel('✅ 全部打滿').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('raid_btn_reset').setLabel('🔄 重設本週').setStyle(ButtonStyle.Secondary)
+    );
+    if (opts.isAdmin) {
+      row.addComponents(
+        new ButtonBuilder().setCustomId('raid_btn_admin_all').setLabel('👥 全體進度').setStyle(ButtonStyle.Danger)
+      );
+    }
+    components.push(row);
+
+    // 快速登記：點一下就記，不用開表單。只列還沒打滿的角色（選單上限 25 個選項）
+    const pending = sorted.filter(({ c }) => c.used < c.cap).slice(0, 25);
+    if (pending.length) {
+      const mkOptions = (step) => pending.map(({ c, i }) => {
+        const add = Math.min(step, c.cap - c.used);
+        return new StringSelectMenuOptionBuilder()
+          .setLabel(`${c.ign}（${c.used} ➔ ${c.used + add} / ${c.cap}）`.slice(0, 100))
+          .setDescription(`${c.job} Lv.${c.level}　${i.icon} 還差 ${c.cap - c.used} 次`.slice(0, 100))
+          .setValue(c.ign.slice(0, 100));
+      });
+
+      components.push(new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder().setCustomId('raid_sel_plus1')
+          .setPlaceholder('➕ 打完一場 → 選角色就 +1 次')
+          .addOptions(mkOptions(1))
+      ));
+      components.push(new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder().setCustomId('raid_sel_plus7')
+          .setPlaceholder(`➕ 一次打完 7 場 → 選角色就 +${RAID_FREE_CAP} 次`)
+          .addOptions(mkOptions(RAID_FREE_CAP))
+      ));
+    }
+  }
+  return { embeds: [embed], components };
+}
+
+// 批次表單：已用次數與上限都預填好，把 7 改成 14 就等於註記吃了突襲卷
+function buildRaidModal(targetUid, profile, nowMs = Date.now()) {
+  const rows = getRaidState(profile, nowMs);
+  let body = rows.map(c => `${c.ign}=${c.used}/${c.cap}`).join('\n');
+  if (body.length > 3900) body = body.slice(0, 3900);
+
+  const modal = new ModalBuilder()
+    .setCustomId(`modal_raid_batch_${targetUid}`)
+    .setTitle('更新本週突襲進入次數');
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('raid_rows')
+        .setLabel('每行一隻：角色=已用/上限')
+        .setPlaceholder('例：沁霜=3/7　‧　吃了突襲卷就把 7 改成 14')
+        .setValue(body)
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+    )
+  );
+  return modal;
+}
+
+// 容忍「角色=3/7」「角色=3」「角色 3/7」「角色 3」，分隔號 = ＝ : ： / ／ 都接受
+function parseRaidBatch(raw) {
+  const rows = [], bad = [];
+  (raw || '').split(/\r?\n/).forEach(line => {
+    const t = line.trim();
+    if (!t) return;
+    let m = t.match(/^(.*)[=＝:：]\s*(\d{1,3})\s*[\/／]\s*(\d{1,3})$/);
+    if (!m) m = t.match(/^(.+?)\s+(\d{1,3})\s*[\/／]\s*(\d{1,3})$/);
+    if (m) { rows.push({ ign: m[1].trim(), used: parseInt(m[2]), cap: parseInt(m[3]) }); return; }
+    m = t.match(/^(.*)[=＝:：]\s*(\d{1,3})$/);
+    if (!m) m = t.match(/^(.+?)\s+(\d{1,3})$/);
+    if (m) { rows.push({ ign: m[1].trim(), used: parseInt(m[2]), cap: null }); return; }
+    bad.push(t);
+  });
+  return { rows: rows.filter(r => r.ign), bad };
+}
+
+// 管理員：全體進度總覽（退休者不列入，他們本來就沒在玩）
+async function buildRaidAdminOverview(nowMs = Date.now()) {
+  if (!db) {
+    return { embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('👥【全體突襲王進度】').setDescription('❌ 資料庫未連線。')], components: [] };
+  }
+  const snap = await db.collection('member_profiles').get();
+  const list = [];
+  let retiredCount = 0;
+
+  snap.forEach(doc => {
+    const d = doc.data();
+    if (!d.mainIgn && !(d.subs || []).length) return;
+    if (d.isRetired) { retiredCount++; return; }
+    const rows = getRaidState(d, nowMs);
+    if (!rows.length) return;
+    list.push({ uid: doc.id, ...raidSummary(rows) });
+  });
+
+  // 沒打的角色數多的排前面，同數再比完成率
+  list.sort((a, b) => (b.untouched - a.untouched) || (a.used / a.cap - b.used / b.cap));
+
+  const lines = list.map(m => {
+    const icon = m.untouched ? '❗' : (m.done === m.total ? '✅' : '🔸');
+    const tail = m.untouched ? `**${m.untouched}** 隻還沒打` : `${m.done}/${m.total} 隻打滿`;
+    return `${icon} <@${m.uid}>　\`${m.used} / ${m.cap} 次\`　${tail}`;
+  });
+
+  let cut = 0;
+  while (lines.join('\n').length > 3400 && lines.length) { lines.pop(); cut++; }
+  let desc = lines.join('\n') || '目前沒有任何現役成員的名冊資料。';
+  if (cut) desc += `\n…其餘 ${cut} 位未列出`;
+
+  const t = list.reduce((a, m) => ({
+    used: a.used + m.used, cap: a.cap + m.cap, untouched: a.untouched + m.untouched
+  }), { used: 0, cap: 0, untouched: 0 });
+
+  const { startMs, endMs } = raidWeekRange(nowMs);
+  desc += '\n━━━━━━━━━━━━━━━━━━━━\n'
+    + `現役成員 **${list.length}** 位　‧　全體 **${t.used} / ${t.cap} 次**　‧　還沒開工的角色 **${t.untouched}** 隻`
+    + `\n⏳ 距離重置：<t:${Math.floor(endMs / 1000)}:R>`;
+
+  const embed = new EmbedBuilder()
+    .setColor(0xE74C3C)
+    .setTitle('👥【全體突襲王進度】')
+    .setDescription(desc)
+    .setFooter({ text: `本週 ${raidMd(startMs)} ~ ${raidMd(endMs)}　‧　已退休 ${retiredCount} 位不列入` });
+
+  const row = new ActionRowBuilder().addComponents(
+    new UserSelectMenuBuilder().setCustomId('admin_raid_pick_user')
+      .setPlaceholder('🔍 看某一位成員的每隻角色明細').setMinValues(1).setMaxValues(1)
+  );
+  return { embeds: [embed], components: [row] };
 }
 
 // 判斷是不是這團的隊長（或管理員）

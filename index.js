@@ -322,15 +322,100 @@ function calculateMinTransfers(balances) {
   return transfers;
 }
 
+// ========== 名冊讀取：慢沒關係，但絕不假裝使用者沒資料 ==========
+// Discord 規則：interaction 要在 3 秒內回應或 defer；defer 過後有 15 分鐘可用。
+// 所以「已 defer 的路徑」可以慢慢讀，只有「要跳表單」的路徑才需要搶 3 秒。
+const PROFILE_SLOW_MS = 10000;    // 已 defer：給 10 秒，不夠再重試
+const PROFILE_FAST_MS = 2500;     // 要跳表單：搶在 Discord 3 秒上限內
+const PROFILE_CACHE_TTL = 60000;  // 快取 60 秒；任何寫入都會讓它失效
+const PROFILE_STALE_MS = 300000;  // 真的讀不到時，5 分鐘內的舊快取總比空白好
+const PROFILE_CACHE = new Map();
+
+const DB_SLOW_MSG = '⏳ 資料庫這次沒回應（伺服器剛喚醒時比較慢），請再按一次。你的資料沒有遺失。';
+
+function cacheProfile(userId, data) {
+  if (userId && data) PROFILE_CACHE.set(userId, { data, at: Date.now() });
+}
+function getCachedProfile(userId, maxAgeMs = PROFILE_CACHE_TTL) {
+  const hit = PROFILE_CACHE.get(userId);
+  if (!hit || Date.now() - hit.at > maxAgeMs) return null;
+  return hit.data;
+}
+function invalidateProfile(userId) { if (userId) PROFILE_CACHE.delete(userId); }
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function withTimeout(promise, ms, label = 'Timeout') {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(label)), ms); })
+  ]);
+}
+
+// 回傳 { ok, exists, data, stale }
+//   ok:false     → 真的讀不到（逾時／斷線）→ 呼叫端要說「資料庫沒回應」，不是「你沒報到」
+//   exists:false → 連線正常，但這個人確實沒有名冊
+async function fetchProfile(userId, opts = {}) {
+  const { timeoutMs = PROFILE_SLOW_MS, retries = 1, useCache = false } = opts;
+  if (!db || !userId) return { ok: false, exists: false, data: {}, reason: 'NO_DB' };
+
+  if (useCache) {
+    const cached = getCachedProfile(userId);
+    if (cached) return { ok: true, exists: true, data: cached, cached: true };
+  }
+
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const doc = await withTimeout(db.collection('member_profiles').doc(userId).get(), timeoutMs);
+      const data = doc?.exists ? doc.data() : null;
+      if (data) cacheProfile(userId, data); else invalidateProfile(userId);
+      return { ok: true, exists: !!data, data: data || {} };
+    } catch (e) {
+      console.error(`讀取名冊失敗 (${userId}) 第 ${i + 1} 次：${e.message}`);
+      if (i < retries) await sleep(500);
+    }
+  }
+
+  const stale = getCachedProfile(userId, PROFILE_STALE_MS);
+  if (stale) return { ok: true, exists: true, data: stale, stale: true };
+  return { ok: false, exists: false, data: {}, reason: 'TIMEOUT' };
+}
+
+// 要跳表單的路徑用這個：先吃快取（剛開面板時已經讀過），讀不到也不會卡死 3 秒
+async function fetchProfileFast(userId) {
+  return fetchProfile(userId, { timeoutMs: PROFILE_FAST_MS, retries: 0, useCache: true });
+}
+
+// 舊介面，既有呼叫點沿用；底層已經變成 10 秒 + 重試 + 舊快取保底
 async function fetchUserDocSafe(userId) {
-  if (!db || !userId) return {};
+  return (await fetchProfile(userId)).data;
+}
+
+// 等級一律夾在 1 ~ 200。原本只濾掉非數字，打成 1550 會原封不動存進去。
+function clampLevel(raw, fallback = '120') {
+  const n = parseInt(String(raw ?? '').replace(/[^0-9]/g, ''), 10);
+  if (!Number.isFinite(n) || n <= 0) return String(fallback);
+  return String(Math.min(200, Math.max(1, n)));
+}
+
+function tpeClock(ms = Date.now()) {
+  const d = new Date(ms + TPE_OFFSET_MS);
+  const p = (x) => String(x).padStart(2, '0');
+  return `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+}
+
+// 面板重繪失敗時，至少讓操作者知道（原本是 .catch(() => {}) 全部吞掉）
+async function warnRefreshFailed(interaction, what) {
+  if (!interaction) return;
+  const msg = `⚠️ ${what}面板重繪失敗，但**資料已經存好了**。請按面板上的 🔄 即時更新 重新抓一次。`;
   try {
-    const doc = await Promise.race([
-      db.collection('member_profiles').doc(userId).get(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 2000))
-    ]);
-    return doc?.exists ? doc.data() : {};
-  } catch { return {}; }
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp({ content: msg, flags: MessageFlags.Ephemeral });
+    } else {
+      await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral });
+    }
+  } catch { /* 連通知都送不出去就算了 */ }
 }
 
 async function getActiveBetDoc() {
@@ -568,7 +653,8 @@ function createPartyComponents(partyId, isClosed = false, isFull = false) {
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`party_join_${partyId}`).setLabel('✋ 報名加入').setStyle(ButtonStyle.Success).setDisabled(isClosed || isFull),
     new ButtonBuilder().setCustomId(`party_set_buff_${partyId}`).setLabel('🪄 設定/更新我的隊伍Buff').setStyle(ButtonStyle.Primary).setDisabled(isClosed),
-    new ButtonBuilder().setCustomId(`party_leave_select_${partyId}`).setLabel('❌ 退出/修改角色').setStyle(ButtonStyle.Secondary).setDisabled(isClosed)
+    new ButtonBuilder().setCustomId(`party_leave_select_${partyId}`).setLabel('❌ 退出/修改角色').setStyle(ButtonStyle.Secondary).setDisabled(isClosed),
+    new ButtonBuilder().setCustomId(`party_refresh_${partyId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary)
   );
 
   // 隊長控管列
@@ -629,7 +715,8 @@ function createMultiBetComponents(betId, options, isSettled = false) {
   rows.push(new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`bet_pity_${betId}`).setLabel('🩹 同情抖內').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`bet_settle_${betId}`).setLabel('⚖️ 結算').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`bet_del_${betId}`).setLabel('🗑️ 廢除').setStyle(ButtonStyle.Danger)
+    new ButtonBuilder().setCustomId(`bet_del_${betId}`).setLabel('🗑️ 廢除').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`bet_refresh_${betId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary)
   ));
   return rows;
 }
@@ -760,7 +847,8 @@ const commands = [
         { name: '🔒 一鍵標記未報到成員為「未認證」', value: 'ADMIN_SET_UNVERIFIED_ALL' },
         { name: '🧹 一鍵清理名冊中的重複角色 ID', value: 'ADMIN_DEDUPE_ALL' },
         { name: '📌 張貼公開的「報到登記面板」到本頻道', value: 'ADMIN_POST_REGISTER' },
-        { name: '⚔️ 查看全體成員的突襲王進度', value: 'ADMIN_RAID_OVERVIEW' }
+        { name: '⚔️ 查看全體成員的突襲王進度', value: 'ADMIN_RAID_OVERVIEW' },
+        { name: '🩺 一鍵修正超出範圍的等級 (夾回 1~200)', value: 'ADMIN_FIX_LEVELS' }
       )
     )
     .addUserOption(o => o.setName('對象成員').setDescription('代填名冊時選擇對象成員 (@成員)').setRequired(false))
@@ -960,7 +1048,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       // 1. /名冊（報到、我的名片、角色管理、成員名冊）
       if (commandName === '名冊') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const d = await fetchUserDocSafe(interaction.user.id);
+        const r = await fetchProfile(interaction.user.id);
+        // 讀取失敗 ≠ 沒報到。不區分的話，資料庫一慢就會把老成員當新人。
+        if (!r.ok) return await interaction.editReply(DB_SLOW_MSG);
+        const d = r.data;
         if (!d.mainIgn) {
           // 還沒建檔：直接給他報到入口，不要只丟一句「請先去某某指令」
           return await interaction.editReply({
@@ -971,7 +1062,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(buildMyCardPayload(d));
       }
 
-      // 3. /升級試算      // 3. /升級試算
+      // 3. /升級試算
       if (commandName === '升級試算') {
         await interaction.deferReply();
         const curLevel = interaction.options.getInteger('目前等級');
@@ -1176,7 +1267,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
               `4. 🧹 **一鍵清理重複角色 ID** (\`/管理員功能 模式:一鍵清理重複\`)\n` +
               `5. 📌 **張貼公開的報到登記面板** (\`/管理員功能 模式:張貼報到面板\`)\n` +
               `6. ⚔️ **查看全體突襲王進度** (\`/管理員功能 模式:全體突襲進度\`)\n` +
-              `7. 🚪 **強制刪除揪團 / 廢除賭局**`
+              `7. 🩺 **一鍵修正超出範圍的等級** (\`/管理員功能 模式:一鍵修正等級\`)\n` +
+              `8. 🚪 **強制刪除揪團 / 廢除賭局**`
             );
           return await interaction.reply({ embeds: [helpEmbed], flags: MessageFlags.Ephemeral });
         }
@@ -1201,6 +1293,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const after = dedupeSubs(d.subs, d.mainIgn);
             if (after.length === before) continue;
             await db.collection('member_profiles').doc(docSnap.id).set({ subs: after }, { merge: true });
+            invalidateProfile(docSnap.id);
             touched++; removed += (before - after.length);
             if (detail.length < 15) {
               detail.push(`• \`${d.nickname || d.mainIgn || docSnap.id}\`：${before} ➔ ${after.length} 隻（清掉 ${before - after.length} 筆）`);
@@ -1242,6 +1335,65 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
 
           return await interaction.editReply(`🔒 **一鍵標記完成！** 已成功為伺服器內 **${count}** 位尚未完成報到的成員添加【未認證】身分組！`);
+        }
+
+        if (mode === 'ADMIN_FIX_LEVELS') {
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+          const snap = await db.collection('member_profiles').get();
+          let touched = 0, fixedCount = 0;
+          const detail = [];
+
+          for (const docSnap of snap.docs) {
+            const d = docSnap.data();
+            const changes = [];
+            const payload = {};
+
+            if (d.mainIgn) {
+              const fixed = clampLevel(d.mainLevel, d.mainLevel);
+              if (String(d.mainLevel) !== fixed) {
+                changes.push(`\`${d.mainIgn}\` ${d.mainLevel}➔${fixed}`);
+                payload.mainLevel = fixed;
+              }
+            }
+
+            const subs = (d.subs || []).map(s => ({ ...s }));
+            subs.forEach(s => {
+              const fixed = clampLevel(s.level, s.level);
+              if (String(s.level) !== fixed) {
+                changes.push(`\`${s.ign}\` ${s.level}➔${fixed}`);
+                s.level = fixed;
+              }
+            });
+
+            if (!changes.length) continue;
+            payload.subs = subs;
+            await db.collection('member_profiles').doc(docSnap.id).set(payload, { merge: true });
+            invalidateProfile(docSnap.id);
+            touched++; fixedCount += changes.length;
+            if (detail.length < 15) detail.push(`• <@${docSnap.id}>：${changes.join('、')}`);
+
+            // 本尊等級被夾回來的話，身分組與暱稱要跟著重算
+            if (payload.mainLevel) {
+              const merged = { ...d, ...payload, subs };
+              await syncMemberRoles(interaction.guild, docSnap.id, merged);
+              const member = await interaction.guild.members.fetch(docSnap.id).catch(() => null);
+              if (member) {
+                const nick = `${d.nickname || ''}[${payload.mainLevel}_${d.mainJob}]`.substring(0, 32);
+                await member.setNickname(nick).catch(() => {});
+              }
+            }
+          }
+
+          if (!touched) return await interaction.editReply('✅ 掃描完成，所有角色等級都在 1~200 範圍內。');
+          const embed = new EmbedBuilder()
+            .setColor(0x57F287)
+            .setTitle('🩺【等級修正完成】')
+            .setDescription(
+              `共修正 **${touched}** 位成員、**${fixedCount}** 隻角色（超過 200 一律夾回 200）。\n` +
+              `━━━━━━━━━━━━━━━━\n` + detail.join('\n') +
+              (touched > detail.length ? `\n…其餘 ${touched - detail.length} 位未列出` : '')
+            );
+          return await interaction.editReply({ embeds: [embed] });
         }
 
         if (mode === 'ADMIN_RAID_OVERVIEW') {
@@ -1371,7 +1523,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // 2. 報到精靈
       if (customId === 'btn_trigger_wizard_main') {
-        const prev = await fetchUserDocSafe(interaction.user.id);
+        const prev = (await fetchProfileFast(interaction.user.id)).data;
         wizardSessionMap.set(interaction.user.id, {
           userId: interaction.user.id,
           targetUserId: interaction.user.id,
@@ -1440,6 +1592,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const dedupedCount = rawSubs.length - validSubs.length;
 
         if (db) {
+          invalidateProfile(targetUid);
           await db.collection('member_profiles').doc(targetUid).set({
             userId: targetUid,
             nickname,
@@ -1567,7 +1720,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const parts = customId.split('_');
         const pId = parts[3];
         const type = parts[4];
-        const prev = await fetchUserDocSafe(interaction.user.id);
+        const prev = (await fetchProfileFast(interaction.user.id)).data;
         let ign = prev.mainIgn || interaction.user.displayName, job = prev.mainJob || '黑騎士', lv = prev.mainLevel || '120';
         if (type === 'sub') {
           const s = prev.subs?.[parseInt(parts[5])];
@@ -1655,7 +1808,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // 依標準清單順序存回，顯示才不會亂跳
         const reqBuffs = STANDARD_PARTY_BUFFS.filter(b => set.has(b));
         await ref.update({ reqBuffs });
-        await refreshPartyMessage(pId, { ...pData, reqBuffs }, (pData.members || []).length >= pData.maxCount);
+        await refreshPartyMessage(pId, { ...pData, reqBuffs }, (pData.members || []).length >= pData.maxCount, interaction);
         return await interaction.update(buildReqBuffPanel(pId, reqBuffs));
       }
 
@@ -1845,7 +1998,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (customId === 'card_btn_update_level') {
-        const profile = await fetchUserDocSafe(interaction.user.id);
+        const r = await fetchProfileFast(interaction.user.id);
+        if (!r.ok) return interaction.reply({ content: DB_SLOW_MSG, flags: MessageFlags.Ephemeral });
+        const profile = r.data;
         if (!profile.mainIgn && !(profile.subs || []).length) {
           return interaction.reply({ content: '❌ 您尚未登記任何角色，請先完成報到！', flags: MessageFlags.Ephemeral });
         }
@@ -1854,17 +2009,63 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // 週二名冊廣播：直接開批次表單，不用再跑一次報到流程
       if (customId === 'btn_batch_level_self') {
-        const profile = await fetchUserDocSafe(interaction.user.id);
+        const r = await fetchProfileFast(interaction.user.id);
+        if (!r.ok) return interaction.reply({ content: DB_SLOW_MSG, flags: MessageFlags.Ephemeral });
+        const profile = r.data;
         if (!profile.mainIgn && !(profile.subs || []).length) {
           return interaction.reply({ content: '📜 您還沒有名冊資料，請先用 `/名冊` 完成報到！', flags: MessageFlags.Ephemeral });
         }
         return await interaction.showModal(buildBatchLevelModal(interaction.user.id, profile));
       }
 
+      // ── 🔄 即時更新：一律強制重讀資料庫，不吃任何快取 ──
+      if (customId === 'refresh_card') {
+        await interaction.deferUpdate();
+        const r = await fetchProfile(interaction.user.id);
+        if (!r.ok) return await interaction.followUp({ content: DB_SLOW_MSG, flags: MessageFlags.Ephemeral });
+        if (!r.exists) return await interaction.followUp({ content: '📜 您還沒有名冊資料，請先完成報到。', flags: MessageFlags.Ephemeral });
+        await interaction.editReply(buildMyCardPayload(r.data));
+        return await interaction.followUp({ content: `🔄 已重新讀取（${tpeClock()}）`, flags: MessageFlags.Ephemeral });
+      }
+
+      if (customId.startsWith('party_refresh_')) {
+        await interaction.deferUpdate();
+        const pId = customId.replace('party_refresh_', '');
+        const doc = await db.collection('party_trainings').doc(pId).get().catch(() => null);
+        if (!doc?.exists) return await interaction.followUp({ content: '❌ 這個團已經不存在了。', flags: MessageFlags.Ephemeral });
+        const pData = doc.data();
+        const isFull = (pData.members || []).length >= pData.maxCount;
+        await interaction.editReply({ embeds: [createPartyEmbed(pData)], components: createPartyComponents(pId, pData.isClosed, isFull) });
+        return await interaction.followUp({ content: `🔄 已重新讀取（${tpeClock()}）`, flags: MessageFlags.Ephemeral });
+      }
+
+      if (customId.startsWith('bet_refresh_')) {
+        await interaction.deferUpdate();
+        const bId = customId.replace('bet_refresh_', '');
+        const doc = await db.collection('active_bets').doc(bId).get().catch(() => null);
+        if (!doc?.exists) return await interaction.followUp({ content: '❌ 這個賭局已經不存在了。', flags: MessageFlags.Ephemeral });
+        const d = doc.data();
+        await interaction.editReply({ embeds: [createMultiBetEmbed(d)], components: createMultiBetComponents(bId, d.options, d.isSettled) });
+        return await interaction.followUp({ content: `🔄 已重新讀取（${tpeClock()}）`, flags: MessageFlags.Ephemeral });
+      }
+
+      if (customId.startsWith('map_refresh_')) {
+        await interaction.deferUpdate();
+        const mapId = customId.replace('map_refresh_', '');
+        const doc = await db.collection('map_shares').doc(mapId).get().catch(() => null);
+        if (!doc?.exists) return await interaction.followUp({ content: '❌ 這則放圖已經不存在了。', flags: MessageFlags.Ephemeral });
+        const mapData = doc.data();
+        await interaction.editReply({ embeds: [createMapEmbed(mapData)], components: createMapComponents(mapId, mapData) });
+        return await interaction.followUp({ content: `🔄 已重新讀取（${tpeClock()}）`, flags: MessageFlags.Ephemeral });
+      }
+
       // 突襲王進度：誰按誰看自己的，廣播上的按鈕也走同一條路
-      if (customId === 'card_btn_raid' || customId === 'btn_raid_self') {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const profile = await fetchUserDocSafe(interaction.user.id);
+      if (customId === 'card_btn_raid' || customId === 'btn_raid_self' || customId === 'refresh_raid') {
+        if (customId === 'refresh_raid') await interaction.deferUpdate();
+        else await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const r = await fetchProfile(interaction.user.id);   // 不吃快取，強制重讀
+        if (!r.ok) return await interaction.editReply(DB_SLOW_MSG);
+        const profile = r.data;
         if (!profile.mainIgn && !(profile.subs || []).length) {
           return await interaction.editReply('📜 您還沒有名冊資料，請先用 \`/名冊\` 完成報到！');
         }
@@ -1875,7 +2076,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (customId === 'raid_btn_update') {
-        const profile = await fetchUserDocSafe(interaction.user.id);
+        const r = await fetchProfileFast(interaction.user.id);
+        if (!r.ok) return interaction.reply({ content: DB_SLOW_MSG, flags: MessageFlags.Ephemeral });
+        const profile = r.data;
         if (!getRaidState(profile).length) {
           return interaction.reply({ content: '❌ 名冊裡沒有角色，無法更新。', flags: MessageFlags.Ephemeral });
         }
@@ -1935,6 +2138,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await db.collection('member_profiles').doc(interaction.user.id).set(
           { userId: interaction.user.id, isRetired: nowRetired }, { merge: true }
         );
+        invalidateProfile(interaction.user.id);
         const merged = { ...prof, isRetired: nowRetired };
         await syncMemberRoles(interaction.guild, interaction.user.id, merged);
         await interaction.editReply(buildMyCardPayload(merged));
@@ -1979,6 +2183,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         await db.collection('member_profiles').doc(targetUid).update({ subs: newSubs });
+        invalidateProfile(targetUid);
 
         await syncMemberRoles(interaction.guild, targetUid, { ...profile, subs: newSubs });
         return await interaction.editReply(`🗑️ 角色【**${ign}**】已成功自名冊與資料庫中徹底刪除，無效身分組已同步清理！`);
@@ -2020,7 +2225,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         await db.collection('map_shares').doc(mapId).update({ takerId: interaction.user.id });
-        await refreshMapMessage(mapId, { ...mapData, takerId: interaction.user.id });
+        await refreshMapMessage(mapId, { ...mapData, takerId: interaction.user.id }, interaction);
 
         const owner = await client.users.fetch(mapData.creatorId).catch(() => null);
         if (owner) {
@@ -2065,7 +2270,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         if (customId === 'admin_panel_lvl') {
-          const prof = await fetchUserDocSafe(targetUid);
+          const r = await fetchProfileFast(targetUid);
+          if (!r.ok) return interaction.reply({ content: DB_SLOW_MSG, flags: MessageFlags.Ephemeral });
+          const prof = r.data;
           if (!prof.mainIgn && !(prof.subs || []).length) {
             return interaction.reply({ content: `❌ 成員 <@${targetUid}> 尚未登記任何角色！`, flags: MessageFlags.Ephemeral });
           }
@@ -2078,6 +2285,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const profile = await fetchUserDocSafe(targetUid);
           const nowRetired = !profile.isRetired;
           await db.collection('member_profiles').doc(targetUid).set({ userId: targetUid, isRetired: nowRetired }, { merge: true });
+          invalidateProfile(targetUid);
           await syncMemberRoles(interaction.guild, targetUid, { ...profile, isRetired: nowRetired });
           return await interaction.editReply(nowRetired
             ? `🚪 已幫 <@${targetUid}> 加上【退休】身分組。原本的職業身分組與名冊紀錄都保留著，名冊上只會多標示「已退休」。`
@@ -2103,7 +2311,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.editReply('❌ 您無權取消此預約！');
         }
         await db.collection('map_shares').doc(mapId).update({ takerId: null });
-        await refreshMapMessage(mapId, { ...mapData, takerId: null });
+        await refreshMapMessage(mapId, { ...mapData, takerId: null }, interaction);
         return await interaction.editReply('✅ 已成功取消預約！');
       }
     }
@@ -2293,7 +2501,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         await ref.update({ members });
-        await refreshPartyMessage(pId, { ...pData, members }, members.length >= pData.maxCount);
+        await refreshPartyMessage(pId, { ...pData, members }, members.length >= pData.maxCount, interaction);
 
         if (added.length) {
           const u = await client.users.fetch(uid).catch(() => null);
@@ -2328,7 +2536,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         idxs.forEach(i => { if (members[i]) removed.push(members.splice(i, 1)[0]); });
 
         await ref.update({ members });
-        await refreshPartyMessage(pId, { ...pData, members }, members.length >= pData.maxCount);
+        await refreshPartyMessage(pId, { ...pData, members }, members.length >= pData.maxCount, interaction);
 
         for (const r of removed) {
           if (!r.userId || r.userId === interaction.user.id) continue;
@@ -2558,7 +2766,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.reply({ content: '❌ 僅超級管理員可使用！', flags: MessageFlags.Ephemeral });
         }
         const targetUid = interaction.values[0];
-        const prof = await fetchUserDocSafe(targetUid);
+        const r = await fetchProfileFast(targetUid);
+        if (!r.ok) return interaction.reply({ content: DB_SLOW_MSG, flags: MessageFlags.Ephemeral });
+        const prof = r.data;
         if (!prof.mainIgn && !(prof.subs || []).length) {
           return interaction.reply({ content: `❌ 成員 <@${targetUid}> 尚未登記任何角色！`, flags: MessageFlags.Ephemeral });
         }
@@ -2726,7 +2936,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (customId === 'modal_wizard_step1_main') {
         const nickname = interaction.fields.getTextInputValue('wiz_nickname').trim();
         const ign = interaction.fields.getTextInputValue('wiz_main_ign').trim();
-        const level = interaction.fields.getTextInputValue('wiz_main_level').replace(/[^0-9]/g, '') || '1';
+        const level = clampLevel(interaction.fields.getTextInputValue('wiz_main_level'), '1');
 
         const session = wizardSessionMap.get(interaction.user.id) || {
           userId: interaction.user.id, targetUserId: interaction.user.id, subs: []
@@ -2747,7 +2957,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!session) return interaction.reply({ content: '❌ 報到已逾時，請重新登記！', flags: MessageFlags.Ephemeral });
 
         const ign = interaction.fields.getTextInputValue('wiz_sub_ign').trim();
-        const level = interaction.fields.getTextInputValue('wiz_sub_level').replace(/[^0-9]/g, '') || '120';
+        const level = clampLevel(interaction.fields.getTextInputValue('wiz_sub_level'), '120');
         const targetUid = session.targetUserId || interaction.user.id;
 
         session.step = 'SUB';
@@ -2781,7 +2991,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const isFull = currentCount >= pData.maxCount;
 
         await db.collection('party_trainings').doc(pId).update({ members });
-        await refreshPartyMessage(pId, { ...pData, members }, isFull);
+        await refreshPartyMessage(pId, { ...pData, members }, isFull, interaction);
         return await interaction.editReply(`🎉 成功報名加入揪團！角色：\`${ign}\``);
       }
 
@@ -2818,7 +3028,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         members[memIdx].buffs = buffObj;
         await db.collection('party_trainings').doc(pId).update({ members });
 
-        await refreshPartyMessage(pId, { ...pData, members }, members.length >= pData.maxCount);
+        await refreshPartyMessage(pId, { ...pData, members }, members.length >= pData.maxCount, interaction);
 
         userChoiceMap.delete(`temp_selected_buffs_${interaction.user.id}`);
         userChoiceMap.delete(`buff_charIgn_${interaction.user.id}`);
@@ -2836,7 +3046,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const ign = interaction.fields.getTextInputValue('c_ign').trim();
         const rawJob = interaction.fields.getTextInputValue('c_job').trim();
-        const lv = interaction.fields.getTextInputValue('c_lv').replace(/[^0-9]/g, '') || '120';
+        const lv = clampLevel(interaction.fields.getTextInputValue('c_lv'), '120');
         const rawBuffs = interaction.fields.getTextInputValue('c_buffs')?.trim();
 
         let job = '黑騎士';
@@ -2856,7 +3066,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const isFull = currentCount >= pData.maxCount;
 
         await db.collection('party_trainings').doc(pId).update({ members });
-        await refreshPartyMessage(pId, { ...pData, members }, isFull);
+        await refreshPartyMessage(pId, { ...pData, members }, isFull, interaction);
         return await interaction.editReply(`🎉 成功報名加入揪團！角色：\`${ign}\``);
       }
 
@@ -2892,7 +3102,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const isFull = (pData.members || []).length >= pData.maxCount;
 
         await db.collection('party_trainings').doc(pId).update(pData);
-        await refreshPartyMessage(pId, pData, isFull);
+        await refreshPartyMessage(pId, pData, isFull, interaction);
         return await interaction.editReply('✅ 揪團資訊已成功更新！');
       }
 
@@ -3044,6 +3254,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
         }
         await db.collection('member_profiles').doc(targetUid).set(payload, { merge: true });
+        invalidateProfile(targetUid);
 
         const merged = { ...profile, ...payload, subs };
         await syncMemberRoles(interaction.guild, targetUid, merged);
@@ -3142,7 +3353,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         d.options[optIdx].pool = (d.options[optIdx].pool || 0) + amt;
 
         await db.collection('active_bets').doc(bId).update({ options: d.options });
-        await refreshBetMessage(bId, d);
+        await refreshBetMessage(bId, d, interaction);
 
         return await interaction.editReply(
           `✅ 已為 **${d.options[optIdx].name}** 下注 \`${formatMeso(amt)} 楓幣\`！（你在這個選項累計 ${formatMeso(cur + amt)}）`
@@ -3154,7 +3365,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const ign = interaction.fields.getTextInputValue('add_char_ign').trim();
         const rawJob = interaction.fields.getTextInputValue('add_char_job').trim();
-        const level = interaction.fields.getTextInputValue('add_char_level').replace(/[^0-9]/g, '') || '120';
+        const level = clampLevel(interaction.fields.getTextInputValue('add_char_level'), '120');
         const targetUid = userChoiceMap.get(`target_add_user_${interaction.user.id}`) || interaction.user.id;
 
         let job = '黑騎士';
@@ -3170,6 +3381,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         subs.push({ ign, job, level, raw: `${ign}/${job}/${level}` });
 
         await db.collection('member_profiles').doc(targetUid).set({ userId: targetUid, subs }, { merge: true });
+        invalidateProfile(targetUid);
 
         await syncMemberRoles(interaction.guild, targetUid, { ...profile, subs });
         userChoiceMap.delete(`target_add_user_${interaction.user.id}`);
@@ -3186,7 +3398,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const mapData = mapDoc.data();
 
         await db.collection('map_shares').doc(mapId).update({ isFinished: true, finishNote: note });
-        await refreshMapMessage(mapId, { ...mapData, isFinished: true, finishNote: note });
+        await refreshMapMessage(mapId, { ...mapData, isFinished: true, finishNote: note }, interaction);
         return await interaction.editReply('🤝 已標記為交接完成，感謝您的分享！');
       }
     }
@@ -3224,33 +3436,41 @@ function parseBuffInput(rawBuffs) {
 }
 
 // 統一重繪揪團面板訊息
-async function refreshPartyMessage(pId, pData, isFull) {
-  if (!pData?.channelId || !pData?.messageId) return;
+async function refreshPartyMessage(pId, pData, isFull, interaction = null) {
+  if (!pData?.channelId || !pData?.messageId) return false;
   try {
-    const ch = await client.channels.fetch(pData.channelId).catch(() => null);
-    if (!ch || !ch.isTextBased()) return;
-    const m = await ch.messages.fetch(pData.messageId).catch(() => null);
-    if (!m) return;
+    const ch = await client.channels.fetch(pData.channelId);
+    if (!ch?.isTextBased()) throw new Error('頻道不存在或不是文字頻道');
+    const m = await ch.messages.fetch(pData.messageId);
     await m.edit({
       embeds: [createPartyEmbed(pData)],
       components: createPartyComponents(pId, pData.isClosed, isFull)
-    }).catch(() => {});
-  } catch (e) { console.error('重繪揪團面板失敗:', e.message); }
+    });
+    return true;
+  } catch (e) {
+    console.error('重繪揪團面板失敗:', e.message);
+    await warnRefreshFailed(interaction, '揪團');
+    return false;
+  }
 }
 
 // 統一重繪賭局面板訊息
-async function refreshBetMessage(bId, betData) {
-  if (!betData?.channelId || !betData?.messageId) return;
+async function refreshBetMessage(bId, betData, interaction = null) {
+  if (!betData?.channelId || !betData?.messageId) return false;
   try {
-    const ch = await client.channels.fetch(betData.channelId).catch(() => null);
-    if (!ch || !ch.isTextBased()) return;
-    const m = await ch.messages.fetch(betData.messageId).catch(() => null);
-    if (!m) return;
+    const ch = await client.channels.fetch(betData.channelId);
+    if (!ch?.isTextBased()) throw new Error('頻道不存在或不是文字頻道');
+    const m = await ch.messages.fetch(betData.messageId);
     await m.edit({
       embeds: [createMultiBetEmbed(betData)],
       components: createMultiBetComponents(bId, betData.options, betData.isSettled)
-    }).catch(() => {});
-  } catch (e) { console.error('重繪賭局面板失敗:', e.message); }
+    });
+    return true;
+  } catch (e) {
+    console.error('重繪賭局面板失敗:', e.message);
+    await warnRefreshFailed(interaction, '賭局');
+    return false;
+  }
 }
 
 // 建立放圖面板 Embed
@@ -3278,24 +3498,29 @@ function createMapComponents(mapId, mapData) {
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`map_take_${mapId}`).setLabel('✋ 我要圖 (立即預約)').setStyle(ButtonStyle.Success).setDisabled(!!mapData?.takerId),
       new ButtonBuilder().setCustomId(`map_cancel_${mapId}`).setLabel('❌ 取消預約').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`map_done_${mapId}`).setLabel('🤝 已交接完成').setStyle(ButtonStyle.Primary)
+      new ButtonBuilder().setCustomId(`map_done_${mapId}`).setLabel('🤝 已交接完成').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`map_refresh_${mapId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary)
     )
   ];
 }
 
 // 統一重繪放圖面板訊息
-async function refreshMapMessage(mapId, mapData) {
-  if (!mapData?.channelId || !mapData?.messageId) return;
+async function refreshMapMessage(mapId, mapData, interaction = null) {
+  if (!mapData?.channelId || !mapData?.messageId) return false;
   try {
-    const ch = await client.channels.fetch(mapData.channelId).catch(() => null);
-    if (!ch || !ch.isTextBased()) return;
-    const m = await ch.messages.fetch(mapData.messageId).catch(() => null);
-    if (!m) return;
+    const ch = await client.channels.fetch(mapData.channelId);
+    if (!ch?.isTextBased()) throw new Error('頻道不存在或不是文字頻道');
+    const m = await ch.messages.fetch(mapData.messageId);
     await m.edit({
       embeds: [createMapEmbed(mapData)],
       components: createMapComponents(mapId, mapData)
-    }).catch(() => {});
-  } catch (e) { console.error('重繪放圖面板失敗:', e.message); }
+    });
+    return true;
+  } catch (e) {
+    console.error('重繪放圖面板失敗:', e.message);
+    await warnRefreshFailed(interaction, '放圖');
+    return false;
+  }
 }
 
 // ==========================================
@@ -3331,7 +3556,8 @@ function buildMyCardPayload(d) {
     new ButtonBuilder().setCustomId('card_btn_roster').setLabel('📋 成員名冊').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('card_btn_retire')
       .setLabel(retired ? '🔄 我回來了 (解除退休)' : '🚪 我要退休')
-      .setStyle(retired ? ButtonStyle.Success : ButtonStyle.Secondary)
+      .setStyle(retired ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('refresh_card').setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary)
   );
   return { embeds: [embed], components: [row1, row2] };
 }
@@ -3349,7 +3575,7 @@ function dedupeSubs(subs, mainIgn) {
     byIgn.set(key, {                        // Map.set 同鍵覆蓋 = 後者勝出
       ign,
       job: sub.job || '主教',
-      level: String(sub.level || '120').replace(/[^0-9]/g, '') || '120'
+      level: clampLevel(sub.level, '120')   // 最後一道防線：分身寫入一律夾 1~200
     });
   });
   return Array.from(byIgn.values());
@@ -3485,6 +3711,7 @@ async function saveRaidState(targetUid, rows, nowMs = Date.now()) {
   const ref = db.collection('member_profiles').doc(targetUid);
   try { await ref.update({ raid }); }
   catch { await ref.set({ userId: targetUid, raid }, { merge: true }); }
+  invalidateProfile(targetUid);
 }
 
 function buildRaidPayload(profile, displayName, opts = {}) {
@@ -3524,7 +3751,8 @@ function buildRaidPayload(profile, displayName, opts = {}) {
   if (!opts.readonly) {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('raid_btn_update').setLabel('📝 批次更新').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('raid_btn_reset').setLabel('🔄 重設本週').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId('raid_btn_reset').setLabel('🔄 重設本週').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('refresh_raid').setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary)
     );
     if (opts.isAdmin) {
       row.addComponents(

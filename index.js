@@ -1882,15 +1882,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(buildRaidModal(interaction.user.id, profile));
       }
 
-      if (customId === 'raid_btn_allfull' || customId === 'raid_btn_reset') {
+      if (customId === 'raid_btn_reset') {
         await interaction.deferUpdate();
         const profile = await fetchUserDocSafe(interaction.user.id);
         const rows = getRaidState(profile);
         if (!rows.length) {
           return await interaction.followUp({ content: '❌ 名冊裡沒有角色。', flags: MessageFlags.Ephemeral });
         }
-        const toFull = customId === 'raid_btn_allfull';
-        rows.forEach(c => { c.used = toFull ? c.cap : 0; });
+        rows.forEach(c => { c.used = 0; });
         await saveRaidState(interaction.user.id, rows);
         const merged = { ...profile, raid: { weekKey: raidWeekKey(), chars: raidCharsMap(rows) } };
         return await interaction.editReply(buildRaidPayload(
@@ -2116,9 +2115,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const customId = interaction.customId;
 
       // 快速登記：選到哪隻就幫那隻加次數，加完直接刷新同一個面板
-      if (customId === 'raid_sel_plus1' || customId === 'raid_sel_plus7') {
+      if (customId === 'raid_sel_plus7') {
         await interaction.deferUpdate();
-        const step = customId === 'raid_sel_plus7' ? RAID_FREE_CAP : 1;
+        const step = RAID_FREE_CAP;
         const profile = await fetchUserDocSafe(interaction.user.id);
         const rows = getRaidState(profile);
         const target = rows.find(c => c.ign === interaction.values[0]);
@@ -3455,13 +3454,12 @@ function getRaidState(profile, nowMs = Date.now()) {
   return out;
 }
 
-// 四種狀態：❗還沒打 / 🔸還差 N 次 / 🎫吃卷中 / ✅已打滿。rank 用來把沒打的排到最前面。
+// 三種狀態：❗還沒打 / 🔸打一半 / ✅打滿。rank 用來把沒打的排到最前面。
+// 吃卷（上限 14）不另外標示，直接看分母。
 function raidRowInfo(c) {
-  const left = c.cap - c.used;
-  const scroll = c.cap === RAID_SCROLL_CAP;
-  if (left <= 0) return { icon: '✅', rank: 2, note: '' };
-  if (c.used === 0) return { icon: '❗', rank: 0, note: scroll ? `還差 ${left} 次（吃卷）` : '' };
-  return { icon: scroll ? '🎫' : '🔸', rank: 1, note: `還差 ${left} 次${scroll ? '（吃卷）' : ''}` };
+  if (c.used >= c.cap) return { icon: '✅', rank: 2 };
+  if (c.used === 0) return { icon: '❗', rank: 0 };
+  return { icon: '🔸', rank: 1 };
 }
 
 function raidSummary(rows) {
@@ -3505,28 +3503,27 @@ function buildRaidPayload(profile, displayName, opts = {}) {
   // 還沒打的排最前面，角色多的人一眼就看到該補哪隻
   const sorted = rows.map(c => ({ c, i: raidRowInfo(c) })).sort((a, b) => a.i.rank - b.i.rank);
   const lines = sorted.map(({ c, i }) =>
-    `${i.icon} **${c.ign}**　${c.job} Lv.${c.level}　\`${c.used} / ${c.cap} 次\`${i.note ? `　${i.note}` : ''}`
+    `${i.icon} **${c.ign}**　${c.job} Lv.${c.level}　\`${c.used} / ${c.cap}\``
   );
 
   const s = raidSummary(rows);
   let desc = lines.join('\n');
   if (desc.length > 3400) desc = desc.slice(0, 3400) + '\n…（角色太多，先列到這裡）';
-  desc += '\n━━━━━━━━━━━━━━━━━━━━\n'
+  desc += '\n━━━━━━━━━━━━━━━━\n'
     + `總計 **${s.used} / ${s.cap} 次**　‧　`
-    + (s.untouched ? `還有 **${s.untouched}** 隻完全沒打` : '每隻都開工了 👍')
-    + `\n⏳ 距離重置：<t:${Math.floor(endMs / 1000)}:R>（週二 ${String(RAID_RESET_HOUR).padStart(2, '0')}:00 維護後歸零）`;
+    + (s.untouched ? `還有 **${s.untouched}** 隻沒打` : '每隻都開工了 👍')
+    + `\n⏳ <t:${Math.floor(endMs / 1000)}:R>重置（週二 ${String(RAID_RESET_HOUR).padStart(2, '0')}:00）`;
 
   const embed = new EmbedBuilder()
     .setColor(s.untouched ? 0xE67E22 : (s.done === s.total ? 0x57F287 : 0x5865F2))
     .setTitle(`⚔️ 突襲王進度${displayName ? ` - ${displayName}` : ''}`)
     .setDescription(desc)
-    .setFooter({ text: `本週 ${raidMd(startMs)} ~ ${raidMd(endMs)}　‧　❗沒打　🔸還差　🎫吃卷中　✅打滿` });
+    .setFooter({ text: `本週 ${raidMd(startMs)} ~ ${raidMd(endMs)}` });
 
   const components = [];
   if (!opts.readonly) {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('raid_btn_update').setLabel('📝 批次更新').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('raid_btn_allfull').setLabel('✅ 全部打滿').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('raid_btn_reset').setLabel('🔄 重設本週').setStyle(ButtonStyle.Secondary)
     );
     if (opts.isAdmin) {
@@ -3536,26 +3533,20 @@ function buildRaidPayload(profile, displayName, opts = {}) {
     }
     components.push(row);
 
-    // 快速登記：點一下就記，不用開表單。只列還沒打滿的角色（選單上限 25 個選項）
+    // 快速登記：只列還沒打滿的角色（選單上限 25 個選項）
     const pending = sorted.filter(({ c }) => c.used < c.cap).slice(0, 25);
     if (pending.length) {
-      const mkOptions = (step) => pending.map(({ c, i }) => {
-        const add = Math.min(step, c.cap - c.used);
+      const options = pending.map(({ c }) => {
+        const to = Math.min(c.used + RAID_FREE_CAP, c.cap);
         return new StringSelectMenuOptionBuilder()
-          .setLabel(`${c.ign}（${c.used} ➔ ${c.used + add} / ${c.cap}）`.slice(0, 100))
-          .setDescription(`${c.job} Lv.${c.level}　${i.icon} 還差 ${c.cap - c.used} 次`.slice(0, 100))
+          .setLabel(`${c.ign}（${c.used} ➔ ${to} / ${c.cap}）`.slice(0, 100))
+          .setDescription(`${c.job} Lv.${c.level}`.slice(0, 100))
           .setValue(c.ign.slice(0, 100));
       });
-
-      components.push(new ActionRowBuilder().addComponents(
-        new StringSelectMenuBuilder().setCustomId('raid_sel_plus1')
-          .setPlaceholder('➕ 打完一場 → 選角色就 +1 次')
-          .addOptions(mkOptions(1))
-      ));
       components.push(new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder().setCustomId('raid_sel_plus7')
-          .setPlaceholder(`➕ 一次打完 7 場 → 選角色就 +${RAID_FREE_CAP} 次`)
-          .addOptions(mkOptions(RAID_FREE_CAP))
+          .setPlaceholder(`➕ 打完 ${RAID_FREE_CAP} 場 → 選角色記上`)
+          .addOptions(options)
       ));
     }
   }

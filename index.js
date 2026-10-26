@@ -399,10 +399,52 @@ function clampLevel(raw, fallback = '120') {
   return String(Math.min(200, Math.max(1, n)));
 }
 
+// ── 共用視覺元件：面板一致的分隔線與進度條 ──
+const PANEL_DIV = '━━━━━━━━━━━━━━━━';
+
+// ANSI 進度條，用在突襲總計與揪團人數
+function ansiBar(done, total, width = 16) {
+  const t = Math.max(1, total);
+  const filled = Math.max(0, Math.min(width, Math.round((done / t) * width)));
+  const pct = Math.round((done / t) * 100);
+  const color = pct >= 100 ? 32 : (pct >= 50 ? 33 : 31);
+  return '\u001b[' + color + 'm' + '█'.repeat(filled) + '\u001b[30m' + '░'.repeat(width - filled)
+    + '\u001b[0m ' + String(pct).padStart(3) + '%';
+}
+
 function tpeClock(ms = Date.now()) {
   const d = new Date(ms + TPE_OFFSET_MS);
   const p = (x) => String(x).padStart(2, '0');
   return `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+}
+
+// 📤 分享面板：只貼「當下狀態的快照」，不帶任何按鈕。
+// 帶按鈕的話，別人按下去動到的是他自己的資料，或是產生第二份不會同步的活面板。
+async function sharePanelSnapshot(interaction, embeds, opts = {}) {
+  const parts = [`📤 由 <@${interaction.user.id}> 分享　‧　<t:${Math.floor(Date.now() / 1000)}:t>`];
+  if (opts.jumpUrl) parts.push(`🔗 [前往原面板](${opts.jumpUrl})`);
+  if (opts.hint) parts.push(opts.hint);
+  try {
+    const ch = interaction.channel;
+    if (!ch?.isTextBased()) throw new Error('這裡不能發訊息');
+    await ch.send({
+      content: parts.join('　‧　'),
+      embeds,
+      allowedMentions: { parse: [] }   // 快照不要真的 tag 到人
+    });
+    return true;
+  } catch (e) {
+    console.error('分享面板失敗:', e.message);
+    return false;
+  }
+}
+
+async function replyShareResult(interaction, okFlag) {
+  const msg = okFlag ? '📤 已把目前的畫面公開貼到這個頻道了。' : '❌ 分享失敗，機器人可能沒有在這個頻道發言的權限。';
+  try {
+    if (interaction.deferred || interaction.replied) await interaction.followUp({ content: msg, flags: MessageFlags.Ephemeral });
+    else await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral });
+  } catch { /* ignore */ }
 }
 
 // 面板重繪失敗時，至少讓操作者知道（原本是 .catch(() => {}) 全部吞掉）
@@ -654,7 +696,8 @@ function createPartyComponents(partyId, isClosed = false, isFull = false) {
     new ButtonBuilder().setCustomId(`party_join_${partyId}`).setLabel('✋ 報名加入').setStyle(ButtonStyle.Success).setDisabled(isClosed || isFull),
     new ButtonBuilder().setCustomId(`party_set_buff_${partyId}`).setLabel('🪄 設定/更新我的隊伍Buff').setStyle(ButtonStyle.Primary).setDisabled(isClosed),
     new ButtonBuilder().setCustomId(`party_leave_select_${partyId}`).setLabel('❌ 退出/修改角色').setStyle(ButtonStyle.Secondary).setDisabled(isClosed),
-    new ButtonBuilder().setCustomId(`party_refresh_${partyId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId(`party_refresh_${partyId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`share_party_${partyId}`).setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary)
   );
 
   // 隊長控管列
@@ -716,7 +759,8 @@ function createMultiBetComponents(betId, options, isSettled = false) {
     new ButtonBuilder().setCustomId(`bet_pity_${betId}`).setLabel('🩹 同情抖內').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`bet_settle_${betId}`).setLabel('⚖️ 結算').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`bet_del_${betId}`).setLabel('🗑️ 廢除').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(`bet_refresh_${betId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId(`bet_refresh_${betId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`share_bet_${betId}`).setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary)
   ));
   return rows;
 }
@@ -829,6 +873,14 @@ const commands = [
     .addIntegerOption(o => o.setName('頻道').setDescription('頻道號碼').setRequired(true).setMinValue(1))
     .addStringOption(o => o.setName('預計多久離開').setDescription('例如：10分鐘後、21:30').setRequired(true))
     .addStringOption(o => o.setName('備註說明').setDescription('選填說明').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('接圖排班')
+    .setDescription('開一張 48 小時的輪流接圖表，大家自己認領時段')
+    .addStringOption(o => o.setName('地圖名稱').setDescription('例如：忘卻6、蛋龍').setRequired(true))
+    .addIntegerOption(o => o.setName('頻道').setDescription('頻道號碼').setRequired(true).setMinValue(1))
+    .addStringOption(o => o.setName('備註').setDescription('例如：連打不洗頻、提前5分鐘到場').setRequired(false))
+    .addIntegerOption(o => o.setName('時段長度').setDescription('一格幾分鐘，預設 60').setRequired(false).setMinValue(15).setMaxValue(240)),
 
   new SlashCommandBuilder()
     .setName('幸運頻道')
@@ -1017,6 +1069,88 @@ client.once(Events.ClientReady, async () => {
       }
     } catch (e) { console.error('週二廣播異常:', e.message); }
   };
+
+  // 每晚 23:00：提醒大家更新突襲進度（不帶統計、不點名）
+  cron.schedule('0 0 23 * * *', async () => {
+    try {
+      const ch = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
+      if (!ch?.isTextBased()) return;
+      const embed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle('🌙【睡前確認】今天的突襲王打完了嗎？')
+        .setDescription('點下面的按鈕看自己每一隻角色還差幾次，順手把今天打的記上去。\n只有你看得到，不會洗頻。');
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('btn_raid_self').setLabel('⚔️ 看我的突襲進度').setStyle(ButtonStyle.Primary)
+      );
+      await ch.send({ embeds: [embed], components: [row] }).catch(() => {});
+    } catch (e) { console.error('23:00 突襲提醒異常:', e.message); }
+  }, { timezone: 'Asia/Taipei' });
+
+  // 每分鐘：接圖排班換班提醒
+  cron.schedule('* * * * *', async () => {
+    if (!db) return;
+    try {
+      const snap = await db.collection('map_rotations').get();
+      const now = Date.now();
+      for (const doc of snap.docs) {
+        const rot = doc.data();
+        if (rot.isClosed) continue;
+        const idx = rotCurrentIndex(rot, now);
+
+        // ── 開打前 30 分鐘提醒 ──
+        // 每格只提醒一次，用 preNotified 記住已經通知過的格子索引。
+        const pre = Array.isArray(rot.preNotified) ? rot.preNotified.slice() : [];
+        const due = [];
+        for (let k = Math.max(0, idx); k < rot.slotCount; k++) {
+          const left = rotSlotMs(rot, k) - now;
+          if (left <= 0) continue;
+          if (left > ROT_PRE_NOTIFY_MS) break;          // 格子按時間遞增，超過就不用再看了
+          if (pre.includes(k)) continue;
+          const sl = rotSlotOf(rot, k);
+          // 只把「有人認領」的格子標記成已通知。空格子留著不標，
+          // 這樣有人在 T-20 才搶進來，下一分鐘照樣收得到提醒。
+          if (!sl) continue;
+          due.push({ k, sl });
+          pre.push(k);
+        }
+        if (pre.length !== (rot.preNotified || []).length) {
+          await doc.ref.update({ preNotified: pre }).catch(() => {});
+        }
+        for (const { k, sl } of due) {
+          const ch2 = await client.channels.fetch(rot.channelId).catch(() => null);
+          if (!ch2?.isTextBased()) continue;
+          await ch2.send({
+            content: `⏰ <@${sl.userId}> 快輪到你了（<t:${Math.floor(rotSlotMs(rot, k) / 1000)}:R>）！\n` +
+              `🗺️ **${rot.mapName}** 第 ${rot.channelNum} 頻道　‧　` +
+              `${rotDayLabel(rotSlotMs(rot, k))} ${rotSlotLabel(rot, k)}`
+          }).catch(() => {});
+        }
+
+        if (idx < 0 || idx >= rot.slotCount) continue;
+        if (rot.notifiedIdx === idx) continue;
+
+        await doc.ref.update({ notifiedIdx: idx }).catch(() => {});
+        const cur = rotSlotOf(rot, idx);
+        await refreshRotationMessage(doc.id, { ...rot, notifiedIdx: idx });
+        if (!cur) continue;
+
+        const ch = await client.channels.fetch(rot.channelId).catch(() => null);
+        if (!ch?.isTextBased()) continue;
+
+        let nextIdx = -1;
+        for (let i = idx + 1; i < rot.slotCount; i++) { if (rotSlotOf(rot, i)) { nextIdx = i; break; } }
+        const prev = rotSlotOf(rot, idx - 1);
+        await ch.send({
+          content: `🔔 **【接圖交接】${rot.mapName} 第 ${rot.channelNum} 頻道**\n` +
+            `輪到 <@${cur.userId}>（\`${cur.ign}\`）了！` +
+            (prev ? `　上一棒：<@${prev.userId}>` : '') +
+            (nextIdx >= 0
+              ? `\n⏭️ 下一棒：<@${rotSlotOf(rot, nextIdx).userId}>　${rotSlotLabel(rot, nextIdx)}`
+              : '\n（後面沒有人排了，散場前記得喊一聲）')
+        }).catch(() => {});
+      }
+    } catch (e) { console.error('接圖排班提醒異常:', e.message); }
+  }, { timezone: 'Asia/Taipei' });
 
   cron.schedule('0 0 9 * * 2', sendTuesdayBroadcast, { timezone: 'Asia/Taipei' });
   cron.schedule('0 0 19 * * 2', sendTuesdayBroadcast, { timezone: 'Asia/Taipei' });
@@ -1454,6 +1588,39 @@ client.on(Events.InteractionCreate, async (interaction) => {
         mapData.channelId = interaction.channelId;
         mapData.messageId = msg.id;
         await mapRef.set(mapData);
+        return;
+      }
+
+      if (commandName === '接圖排班') {
+        if (!db) return interaction.reply({ content: '❌ 資料庫未連線', flags: MessageFlags.Ephemeral });
+        await interaction.deferReply();
+
+        const slotMinutes = rotSnapSlot(interaction.options.getInteger('時段長度'));
+        const now = Date.now();
+        const startMs = rotAlignStart(now, slotMinutes);
+        const slotCount = Math.floor((ROT_SPAN_HOURS * 60) / slotMinutes);
+
+        const ref = db.collection('map_rotations').doc();
+        const rot = {
+          id: ref.id,
+          creatorId: interaction.user.id,
+          creatorTag: interaction.member?.displayName || interaction.user.username,
+          creatorAvatar: interaction.user.displayAvatarURL(),
+          mapName: interaction.options.getString('地圖名稱'),
+          channelNum: interaction.options.getInteger('頻道'),
+          note: interaction.options.getString('備註') || '無特殊備註',
+          slotMinutes, startMs, slotCount,
+          slots: {}, colors: {}, isClosed: false, notifiedIdx: -1, preNotified: [],
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        };
+
+        const msg = await interaction.editReply({
+          embeds: [buildRotationEmbed(rot)],
+          components: buildRotationComponents(ref.id, rot)
+        });
+        rot.channelId = interaction.channelId;
+        rot.messageId = msg.id;
+        await ref.set(rot);
         return;
       }
 
@@ -2018,6 +2185,97 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(buildBatchLevelModal(interaction.user.id, profile));
       }
 
+      if (customId === 'share_roster') {
+        await interaction.deferUpdate();
+        const embed = await generateJobEmbed('ALL_JOBS_LIST');
+        return await replyShareResult(interaction, await sharePanelSnapshot(interaction, [embed]));
+      }
+
+      // ── 📤 分享面板：貼出當下狀態的快照，不帶按鈕 ──
+      if (customId === 'share_card' || customId === 'share_raid') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const r = await fetchProfile(interaction.user.id);
+        if (!r.ok) return await interaction.editReply(DB_SLOW_MSG);
+        if (!r.exists) return await interaction.editReply('📜 您還沒有名冊資料，沒有東西可以分享。');
+        const name = r.data.nickname || r.data.mainIgn;
+        const payload = customId === 'share_card'
+          ? buildMyCardPayload(r.data)
+          : buildRaidPayload(r.data, name, { readonly: true });
+        const okFlag = await sharePanelSnapshot(interaction, payload.embeds);
+        return await interaction.editReply(okFlag
+          ? '📤 已把你的面板公開貼到這個頻道了。'
+          : '❌ 分享失敗，機器人可能沒有在這個頻道發言的權限。');
+      }
+
+      if (customId === 'share_raid_all' || customId === 'refresh_raid_all') {
+        if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.reply({ content: '❌ 僅超級管理員可使用！', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferUpdate();
+        const payload = await buildRaidAdminOverview();
+        if (customId === 'refresh_raid_all') {
+          await interaction.editReply(payload);
+          return await interaction.followUp({ content: `🔄 已重新讀取（${tpeClock()}）`, flags: MessageFlags.Ephemeral });
+        }
+        return await replyShareResult(interaction, await sharePanelSnapshot(interaction, payload.embeds));
+      }
+
+      if (customId.startsWith('share_party_') || customId.startsWith('share_bet_')
+        || customId.startsWith('share_map_') || customId.startsWith('share_rot_')) {
+        await interaction.deferUpdate();
+        const kind = customId.split('_')[1];
+        const id = customId.replace(`share_${kind}_`, '');
+        const COLL = { party: 'party_trainings', bet: 'active_bets', map: 'map_shares', rot: 'map_rotations' };
+        const doc = await db.collection(COLL[kind]).doc(id).get().catch(() => null);
+        if (!doc?.exists) {
+          return await interaction.followUp({ content: '❌ 這個面板的資料已經不存在了。', flags: MessageFlags.Ephemeral });
+        }
+        const d = doc.data();
+        const embed = kind === 'party' ? createPartyEmbed(d)
+          : kind === 'bet' ? createMultiBetEmbed(d)
+          : kind === 'map' ? createMapEmbed(d)
+          : buildRotationEmbed(d);
+        const jumpUrl = (d.channelId && d.messageId && interaction.guildId)
+          ? `https://discord.com/channels/${interaction.guildId}/${d.channelId}/${d.messageId}`
+          : null;
+        const okFlag = await sharePanelSnapshot(interaction, [embed], {
+          jumpUrl, hint: jumpUrl ? '要操作請點原面板' : null
+        });
+        return await replyShareResult(interaction, okFlag);
+      }
+
+      // ── 🗓️ 接圖排班 ──
+      if (customId.startsWith('rot_refresh_') || customId.startsWith('rot_close_')) {
+        await interaction.deferUpdate();
+        const closing = customId.startsWith('rot_close_');
+        const rotId = customId.replace(closing ? 'rot_close_' : 'rot_refresh_', '');
+        const ref = db.collection('map_rotations').doc(rotId);
+        const doc = await ref.get().catch(() => null);
+        if (!doc?.exists) {
+          return await interaction.followUp({ content: '❌ 這張排班表已經不存在了。', flags: MessageFlags.Ephemeral });
+        }
+        let rot = doc.data();
+
+        if (closing) {
+          const canClose = rot.creatorId === interaction.user.id
+            || isSuperAdmin(interaction.user.id, interaction.memberPermissions);
+          if (!canClose) {
+            return await interaction.followUp({ content: '❌ 只有開表的人或管理員可以結束排班。', flags: MessageFlags.Ephemeral });
+          }
+          await ref.update({ isClosed: true });
+          rot = { ...rot, isClosed: true };
+        }
+
+        await interaction.editReply({
+          embeds: [buildRotationEmbed(rot)],
+          components: buildRotationComponents(rotId, rot)
+        });
+        return await interaction.followUp({
+          content: closing ? '🚪 排班已結束，表格保留在頻道上。' : `🔄 已重新讀取（${tpeClock()}）`,
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
       // ── 🔄 即時更新：一律強制重讀資料庫，不吃任何快取 ──
       if (customId === 'refresh_card') {
         await interaction.deferUpdate();
@@ -2115,6 +2373,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const embed = await generateJobEmbed('ALL_JOBS_LIST');
         const isAdmin = isSuperAdmin(interaction.user.id, interaction.memberPermissions);
         const components = [buildJobQueryMenu(isAdmin)];
+        components.push(new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('share_roster').setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary)
+        ));
         if (isAdmin) {
           components.push(
             new ActionRowBuilder().addComponents(
@@ -2346,6 +2607,94 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.followUp({
           content: `⚔️ **${target.ign}** 記上了：\`${from} ➔ ${target.used} / ${target.cap} 次\``
             + (target.used >= target.cap ? '　✅ 這隻打滿了！' : `　還差 ${target.cap - target.used} 次`),
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      // 接圖排班：取消自己的時段
+      if (customId.startsWith('rot_drop_')) {
+        await interaction.deferUpdate();
+        const rotId = customId.replace('rot_drop_', '');
+        const ref = db.collection('map_rotations').doc(rotId);
+        const doc = await ref.get().catch(() => null);
+        if (!doc?.exists) {
+          return await interaction.followUp({ content: '❌ 這張排班表已經不存在了。', flags: MessageFlags.Ephemeral });
+        }
+        const rot = doc.data();
+        const idx = parseInt(interaction.values[0]);
+        const slot = rotSlotOf(rot, idx);
+        if (!slot) {
+          return await interaction.followUp({ content: '💡 這個時段已經是空的了。', flags: MessageFlags.Ephemeral });
+        }
+
+        const isOwner = slot.userId === interaction.user.id;
+        const canForce = rot.creatorId === interaction.user.id
+          || isSuperAdmin(interaction.user.id, interaction.memberPermissions);
+        if (!isOwner && !canForce) {
+          return await interaction.followUp({
+            content: `❌ 這是 <@${slot.userId}> 排的，只有他本人、開表的人或管理員可以取消。`,
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const slots = { ...(rot.slots || {}) };
+        delete slots[String(idx)];
+        await ref.update({ slots });   // colors 保留不動，之後再排回來還是同一個顏色
+
+        const merged = { ...rot, slots };
+        await interaction.editReply({
+          embeds: [buildRotationEmbed(merged)],
+          components: buildRotationComponents(rotId, merged)
+        });
+        return await interaction.followUp({
+          content: `🗑️ 已清空 ${rotDayLabel(rotSlotMs(rot, idx))} ${rotSlotLabel(rot, idx)}`
+            + (isOwner ? '' : `（原本是 <@${slot.userId}>，已代為取消）`),
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      // 接圖排班：認領時段。同一格只會有一個人，先搶先贏。
+      if (customId.startsWith('rot_take_')) {
+        await interaction.deferUpdate();
+        const rotId = customId.replace('rot_take_', '');
+        const ref = db.collection('map_rotations').doc(rotId);
+        const doc = await ref.get().catch(() => null);
+        if (!doc?.exists) {
+          return await interaction.followUp({ content: '❌ 這張排班表已經不存在了。', flags: MessageFlags.Ephemeral });
+        }
+        const rot = doc.data();
+        if (rot.isClosed) {
+          return await interaction.followUp({ content: '🚪 這張排班表已經結束了。', flags: MessageFlags.Ephemeral });
+        }
+
+        const idx = parseInt(interaction.values[0]);
+        if (!Number.isFinite(idx) || idx < 0 || idx >= rot.slotCount) {
+          return await interaction.followUp({ content: '❌ 這個時段不存在。', flags: MessageFlags.Ephemeral });
+        }
+        if (idx < rotCurrentIndex(rot)) {
+          return await interaction.followUp({ content: '⌛ 這個時段已經過去了，請按 🔄 即時更新看最新的表。', flags: MessageFlags.Ephemeral });
+        }
+        const occupied = rotSlotOf(rot, idx);
+        if (occupied) {
+          return await interaction.followUp({
+            content: `😅 慢了一步，${rotSlotLabel(rot, idx)} 已經被 <@${occupied.userId}> 接走了。請按 🔄 即時更新。`,
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const prof = (await fetchProfile(interaction.user.id)).data;
+        const ign = prof.mainIgn || interaction.member?.displayName || interaction.user.username;
+        const slots = { ...(rot.slots || {}), [String(idx)]: { userId: interaction.user.id, ign } };
+        const colors = rotAssignColor(rot, interaction.user.id);
+        await ref.update({ slots, colors });
+
+        const merged = { ...rot, slots, colors };
+        await interaction.editReply({
+          embeds: [buildRotationEmbed(merged)],
+          components: buildRotationComponents(rotId, merged)
+        });
+        return await interaction.followUp({
+          content: `✅ ${rotDayLabel(rotSlotMs(rot, idx))} ${rotSlotLabel(rot, idx)} 是你的了，到點機器人會 tag 你。\n要反悔的話用下面的「❌ 取消時段」選單。`,
           flags: MessageFlags.Ephemeral
         });
       }
@@ -3499,7 +3848,8 @@ function createMapComponents(mapId, mapData) {
       new ButtonBuilder().setCustomId(`map_take_${mapId}`).setLabel('✋ 我要圖 (立即預約)').setStyle(ButtonStyle.Success).setDisabled(!!mapData?.takerId),
       new ButtonBuilder().setCustomId(`map_cancel_${mapId}`).setLabel('❌ 取消預約').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`map_done_${mapId}`).setLabel('🤝 已交接完成').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`map_refresh_${mapId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId(`map_refresh_${mapId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`share_map_${mapId}`).setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary)
     )
   ];
 }
@@ -3557,7 +3907,8 @@ function buildMyCardPayload(d) {
     new ButtonBuilder().setCustomId('card_btn_retire')
       .setLabel(retired ? '🔄 我回來了 (解除退休)' : '🚪 我要退休')
       .setStyle(retired ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('refresh_card').setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId('refresh_card').setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('share_card').setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary)
   );
   return { embeds: [embed], components: [row1, row2] };
 }
@@ -3736,7 +4087,8 @@ function buildRaidPayload(profile, displayName, opts = {}) {
   const s = raidSummary(rows);
   let desc = lines.join('\n');
   if (desc.length > 3400) desc = desc.slice(0, 3400) + '\n…（角色太多，先列到這裡）';
-  desc += '\n━━━━━━━━━━━━━━━━\n'
+  desc += `\n${PANEL_DIV}\n`
+    + `\`\`\`ansi\n${ansiBar(s.used, s.cap)}\n\`\`\`\n`
     + `總計 **${s.used} / ${s.cap} 次**　‧　`
     + (s.untouched ? `還有 **${s.untouched}** 隻沒打` : '每隻都開工了 👍')
     + `\n⏳ <t:${Math.floor(endMs / 1000)}:R>重置（週二 ${String(RAID_RESET_HOUR).padStart(2, '0')}:00）`;
@@ -3752,7 +4104,8 @@ function buildRaidPayload(profile, displayName, opts = {}) {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('raid_btn_update').setLabel('📝 批次更新').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId('raid_btn_reset').setLabel('🔄 重設本週').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('refresh_raid').setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId('refresh_raid').setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('share_raid').setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary)
     );
     if (opts.isAdmin) {
       row.addComponents(
@@ -3868,11 +4221,294 @@ async function buildRaidAdminOverview(nowMs = Date.now()) {
     .setDescription(desc)
     .setFooter({ text: `本週 ${raidMd(startMs)} ~ ${raidMd(endMs)}　‧　已退休 ${retiredCount} 位不列入` });
 
+  const btnRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('refresh_raid_all').setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('share_raid_all').setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary)
+  );
   const row = new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder().setCustomId('admin_raid_pick_user')
       .setPlaceholder('🔍 看某一位成員的每隻角色明細').setMinValues(1).setMaxValues(1)
   );
-  return { embeds: [embed], components: [row] };
+  return { embeds: [embed], components: [btnRow, row] };
+}
+
+// ===================== 輪流接圖排班表 =====================
+const ROT_SPAN_HOURS = 48;          // 一張表涵蓋 48 小時
+const ROT_DEFAULT_SLOT_MIN = 60;    // 預設一格一小時，開表時可自訂
+const ROT_MAX_ROWS = 48;            // 表格最多畫 48 列，其餘用文字帶過
+const ROT_PICK_LIMIT = 25;          // Discord 下拉選單硬上限
+const ROT_PRE_NOTIFY_MS = 30 * 60000;   // 輪到自己前 30 分鐘提醒一次
+const ROT_COLORS = [31, 32, 33, 34, 35, 36];   // ANSI 前景色：紅 綠 黃 藍 洋紅 青
+const ROT_WEEKDAY = ['日', '一', '二', '三', '四', '五', '六'];
+// 時段長度必須整除 1440（一天的分鐘數），行事曆的橫列才會剛好對齊到整點
+const ROT_ALLOWED_SLOTS = [15, 20, 30, 40, 45, 60, 80, 90, 120, 180, 240];
+function rotSnapSlot(min) {
+  const m = parseInt(min) || ROT_DEFAULT_SLOT_MIN;
+  return ROT_ALLOWED_SLOTS.reduce((best, c) => Math.abs(c - m) < Math.abs(best - m) ? c : best, ROT_DEFAULT_SLOT_MIN);
+}
+
+// 把起點對齊到「台北午夜起算的整格」，這樣 20:00、21:00 這種漂亮的邊界才會出現
+function rotAlignStart(nowMs, slotMinutes) {
+  const t = tpeToday(nowMs);
+  const midnight = tpeWallClockToMs(t.year, t.month, t.day, 0, 0);
+  const slotMs = slotMinutes * 60000;
+  return midnight + Math.floor((nowMs - midnight) / slotMs) * slotMs;
+}
+
+function rotSlotMs(rot, idx) { return rot.startMs + idx * rot.slotMinutes * 60000; }
+function rotCurrentIndex(rot, nowMs = Date.now()) {
+  return Math.floor((nowMs - rot.startMs) / (rot.slotMinutes * 60000));
+}
+function rotSlotOf(rot, idx) { return (rot.slots || {})[String(idx)] || null; }
+
+function rotTimeLabel(ms) {
+  const d = new Date(ms + TPE_OFFSET_MS);
+  return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
+}
+function rotDayLabel(ms) {
+  const d = new Date(ms + TPE_OFFSET_MS);
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()} (${ROT_WEEKDAY[d.getUTCDay()]})`;
+}
+function rotDayKey(ms) {
+  const d = new Date(ms + TPE_OFFSET_MS);
+  return `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+}
+function rotSlotLabel(rot, idx) {
+  const a = rotSlotMs(rot, idx), b = a + rot.slotMinutes * 60000;
+  return `${rotTimeLabel(a)} ~ ${rotTimeLabel(b)}`;
+}
+
+// 這張表裡出現過的人依「第一次出現的順序」配色，有人取消也不會整排跳色
+// 配色在「第一次認領」時就鎖定並存進文件。
+// 若改成每次依現有順序重算，有人取消整排顏色就會跟著跳掉，看起來像換了一批人。
+function rotAssignColor(rot, userId) {
+  const colors = { ...(rot.colors || {}) };
+  if (colors[userId]) return colors;
+  const used = new Set(Object.values(colors).map(Number));
+  colors[userId] = ROT_COLORS.find(c => !used.has(c)) || ROT_COLORS[Object.keys(colors).length % ROT_COLORS.length];
+  return colors;
+}
+function rotColorMap(rot) {
+  return new Map(Object.entries(rot.colors || {}).map(([k, v]) => [k, Number(v)]));
+}
+
+function rotEmptyIndexes(rot, nowMs = Date.now()) {
+  const from = Math.max(0, rotCurrentIndex(rot, nowMs));
+  const out = [];
+  for (let i = from; i < rot.slotCount; i++) if (!rotSlotOf(rot, i)) out.push(i);
+  return out;
+}
+function rotMyIndexes(rot, userId, nowMs = Date.now()) {
+  const from = Math.max(0, rotCurrentIndex(rot, nowMs));
+  const out = [];
+  for (let i = from; i < rot.slotCount; i++) if (rotSlotOf(rot, i)?.userId === userId) out.push(i);
+  return out;
+}
+
+// 等寬字體裡中文字佔兩格。不照這個算，整張行事曆的欄位會歪掉。
+function dispWidth(str) {
+  let w = 0;
+  for (const ch of String(str)) {
+    w += /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹯＀-｠￠-￦　-〿]/.test(ch) ? 2 : 1;
+  }
+  return w;
+}
+function padCell(str, width) {
+  return String(str) + ' '.repeat(Math.max(0, width - dispWidth(str)));
+}
+// 格子裡放得下的識別字：中文取一個字，英數取兩個字，寬度都是 2
+function rotTag(ign) {
+  const chars = [...String(ign || '?')];
+  if (!chars.length) return '??';
+  return dispWidth(chars[0]) === 2 ? chars[0] : padCell(chars.slice(0, 2).join(''), 2);
+}
+function tpeMidnight(ms) {
+  const t = tpeToday(ms);
+  return tpeWallClockToMs(t.year, t.month, t.day, 0, 0);
+}
+
+// 把排班表畫成行事曆：直欄是日期、橫列是時段，格子用顏色區分是誰
+function rotRenderGrid(rot, nowMs = Date.now()) {
+  const slotMs = rot.slotMinutes * 60000;
+  const rowsPerDay = Math.round(1440 / rot.slotMinutes);
+  const endMs = rot.startMs + rot.slotCount * slotMs;
+  const colors = rotColorMap(rot);
+  const curIdx = rotCurrentIndex(rot, nowMs);
+
+  const days = [];
+  for (let d = tpeMidnight(rot.startMs); d < endMs; d += 86400000) days.push(d);
+
+  const TIME_W = 7, CELL_W = 6;
+  let head = padCell('', TIME_W);
+  let head2 = padCell('', TIME_W);
+  days.forEach(d => {
+    head += padCell(rotDayLabel(d).split(' ')[0], CELL_W);
+    head2 += padCell(rotDayLabel(d).split(' ')[1] || '', CELL_W);
+  });
+
+  // 先把每一列算出來，再決定要不要把整段空白列折疊起來
+  const rows = [];
+  for (let r = 0; r < rowsPerDay; r++) {
+    const cells = days.map(d => {
+      const ms = d + r * slotMs;
+      const idx = Math.round((ms - rot.startMs) / slotMs);
+      if (idx < 0 || idx >= rot.slotCount) return { kind: 'out' };
+      const s = rotSlotOf(rot, idx);
+      if (!s) return { kind: 'free', idx, now: idx === curIdx };
+      return { kind: 'busy', idx, s, past: idx < curIdx, now: idx === curIdx };
+    });
+    rows.push({ r, time: rotTimeLabel(rot.startMs - (rot.startMs % slotMs) + r * slotMs), cells });
+  }
+  // time 以當日 00:00 起算比較直觀
+  rows.forEach(row => { row.time = rotTimeLabel(tpeMidnight(rot.startMs) + row.r * slotMs); });
+
+  // 「現在」那一列永遠不折疊，否則 ▶ 標記會被藏起來，看不出自己在時間軸的哪裡
+  const emptyRow = (row) => row.cells.every(c => c.kind !== 'busy' && !c.now);
+  const collapse = rowsPerDay > 26;   // 一格 < 60 分鐘才折疊，不然整張表會太長
+
+  let table = '```ansi\n';
+  table += `\u001b[1;30m${head}\u001b[0m\n`;
+  if (head2.trim()) table += `\u001b[30m${head2}\u001b[0m\n`;
+
+  let r = 0;
+  while (r < rows.length) {
+    if (collapse && emptyRow(rows[r])) {
+      let j = r;
+      while (j < rows.length && emptyRow(rows[j])) j++;
+      if (j - r >= 2) {
+        table += `\u001b[30m${padCell('  ⋯', TIME_W)}（${j - r} 列全空）\u001b[0m\n`;
+        r = j; continue;
+      }
+    }
+    const row = rows[r];
+    const isNow = row.cells.some(c => c.now);
+    let line = (isNow ? '\u001b[1;37m▶\u001b[0m' : ' ') + padCell(row.time, TIME_W - 1);
+    row.cells.forEach(c => {
+      if (c.kind === 'out') line += `\u001b[30m${padCell('·', CELL_W)}\u001b[0m`;
+      else if (c.kind === 'free') line += `\u001b[30m${padCell('░░', CELL_W)}\u001b[0m`;
+      else {
+        const col = c.past ? 30 : (colors.get(c.s.userId) || 37);
+        line += `\u001b[${col}m${padCell('██' + rotTag(c.s.ign), CELL_W)}\u001b[0m`;
+      }
+    });
+    table += line + '\n';
+    r++;
+  }
+  table += '```';
+
+  // 圖例：顏色只有六種，光看色塊認不出人，一定要有對照表
+  const seen = [];
+  for (let i = 0; i < rot.slotCount; i++) {
+    const s = rotSlotOf(rot, i);
+    if (s && !seen.some(x => x.userId === s.userId)) seen.push(s);
+  }
+  const legend = seen.length
+    ? '\n```ansi\n' + seen.map(s =>
+        `\u001b[${colors.get(s.userId) || 37}m██ ${rotTag(s.ign)}\u001b[0m = ${s.ign}`).join('\n') + '\n```'
+    : '';
+
+  return { table, legend };
+}
+
+function buildRotationEmbed(rot, nowMs = Date.now()) {
+  const curIdx = rotCurrentIndex(rot, nowMs);
+  const colors = rotColorMap(rot);
+  const { table, legend } = rotRenderGrid(rot, nowMs);
+
+  const cur = curIdx >= 0 && curIdx < rot.slotCount ? rotSlotOf(rot, curIdx) : null;
+  let nextIdx = -1;
+  for (let i = Math.max(0, curIdx) + 1; i < rot.slotCount; i++) { if (rotSlotOf(rot, i)) { nextIdx = i; break; } }
+  const nxt = nextIdx >= 0 ? rotSlotOf(rot, nextIdx) : null;
+
+  const emptyCount = rotEmptyIndexes(rot, nowMs).length;
+  const taken = rot.slotCount - Math.max(0, curIdx) - emptyCount;
+
+  let status;
+  if (rot.isClosed) status = '🔴 **已結束排班**';
+  else if (curIdx >= rot.slotCount) status = '🔴 **排班時間已過**';
+  else if (cur) status = `🟢 現在：<@${cur.userId}>（\`${cur.ign}\`）`;
+  else status = '⚪ 現在這格**沒人接**，歡迎直接上';
+  if (!rot.isClosed && nxt) {
+    status += `\n⏭️ 下一棒：<@${nxt.userId}>（\`${nxt.ign}\`）<t:${Math.floor(rotSlotMs(rot, nextIdx) / 1000)}:t> 交接`;
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(rot.isClosed ? 0x95A5A6 : (cur ? 0x57F287 : 0xF1C40F))
+    .setTitle(`🗓️【輪流接圖】${rot.mapName}　‧　第 ${rot.channelNum} 頻道`)
+    .setDescription(
+      `📌 ${rot.note || '無特殊備註'}\n` +
+      `${PANEL_DIV}\n${status}\n\n${table}${legend}`
+    )
+    .setFooter({ text: `一格 ${rot.slotMinutes} 分鐘　‧　已排 ${taken} 格　‧　還空 ${emptyCount} 格　‧　· 表示不在排班範圍` });
+
+  if (rot.creatorTag) {
+    embed.setAuthor({ name: `發起人：${rot.creatorTag}`, iconURL: rot.creatorAvatar || undefined });
+  }
+  return embed;
+}
+
+function buildRotationComponents(rotId, rot, nowMs = Date.now()) {
+  if (rot.isClosed || rotCurrentIndex(rot, nowMs) >= rot.slotCount) {
+    return [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`share_rot_${rotId}`).setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary)
+    )];
+  }
+
+  const rows = [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`rot_refresh_${rotId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`share_rot_${rotId}`).setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`rot_close_${rotId}`).setLabel('🚪 結束排班').setStyle(ButtonStyle.Danger)
+  )];
+
+  const empties = rotEmptyIndexes(rot, nowMs).slice(0, ROT_PICK_LIMIT);
+  if (empties.length) {
+    rows.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId(`rot_take_${rotId}`)
+        .setPlaceholder('✋ 我要接這段 — 選一個空的時段')
+        .addOptions(empties.map(i => new StringSelectMenuOptionBuilder()
+          .setLabel(rotSlotLabel(rot, i).slice(0, 100))
+          .setDescription(rotDayLabel(rotSlotMs(rot, i)).slice(0, 100))
+          .setValue(String(i))))
+    ));
+  }
+
+  // 取消自己的時段。認領選單只列空格子，沒有這個選單就沒有地方反悔。
+  const mine = rotAllTakenIndexes(rot, nowMs).slice(0, ROT_PICK_LIMIT);
+  if (mine.length) {
+    rows.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId(`rot_drop_${rotId}`)
+        .setPlaceholder('❌ 取消時段 — 只能取消自己排的')
+        .addOptions(mine.map(i => new StringSelectMenuOptionBuilder()
+          .setLabel(rotSlotLabel(rot, i).slice(0, 100))
+          .setDescription(`${rotDayLabel(rotSlotMs(rot, i))}　${rotSlotOf(rot, i).ign}`.slice(0, 100))
+          .setValue(String(i))))
+    ));
+  }
+  return rows;
+}
+
+// 面板是公開的、所有人共用一份，所以選單不能只列某個人的時段。
+// 這裡列出所有「已被認領且還沒過去」的時段，按下去時才驗證是不是本人。
+function rotAllTakenIndexes(rot, nowMs = Date.now()) {
+  const from = Math.max(0, rotCurrentIndex(rot, nowMs));
+  const out = [];
+  for (let i = from; i < rot.slotCount; i++) if (rotSlotOf(rot, i)) out.push(i);
+  return out;
+}
+
+async function refreshRotationMessage(rotId, rot, interaction = null) {
+  if (!rot?.channelId || !rot?.messageId) return false;
+  try {
+    const ch = await client.channels.fetch(rot.channelId);
+    if (!ch?.isTextBased()) throw new Error('頻道不存在或不是文字頻道');
+    const m = await ch.messages.fetch(rot.messageId);
+    await m.edit({ embeds: [buildRotationEmbed(rot)], components: buildRotationComponents(rotId, rot) });
+    return true;
+  } catch (e) {
+    console.error('重繪排班表失敗:', e.message);
+    await warnRefreshFailed(interaction, '接圖排班');
+    return false;
+  }
 }
 
 // 判斷是不是這團的隊長（或管理員）

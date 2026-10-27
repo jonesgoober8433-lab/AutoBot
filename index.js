@@ -880,8 +880,9 @@ const commands = [
     .addStringOption(o => o.setName('地圖名稱').setDescription('例如：忘卻6、蛋龍').setRequired(true))
     .addIntegerOption(o => o.setName('頻道').setDescription('頻道號碼').setRequired(true).setMinValue(1))
     .addStringOption(o => o.setName('備註').setDescription('例如：連打不洗頻、提前5分鐘到場').setRequired(false))
-    .addIntegerOption(o => o.setName('時段長度').setDescription('一格幾分鐘，預設 60').setRequired(false).setMinValue(15).setMaxValue(240))
-    .addIntegerOption(o => o.setName('排班時數').setDescription('這張表要排幾小時，預設 48（最多 168）').setRequired(false).setMinValue(1).setMaxValue(168))
+    .addStringOption(o => o.setName('開始時間').setDescription('例如 20:00 或 10/28 20:00，不填＝現在').setRequired(false))
+    .addStringOption(o => o.setName('結束時間').setDescription('例如 08:00 或 10/29 08:00，不填就用「排班時數」').setRequired(false))
+    .addIntegerOption(o => o.setName('排班時數').setDescription('沒填結束時間時用這個，1 ~ 48，預設 48').setRequired(false).setMinValue(1).setMaxValue(48))
     .addStringOption(o => o.setName('買圖價格').setDescription('這張圖花多少錢，例如 5000w。不填＝免費團').setRequired(false))
     .addStringOption(o => o.setName('分攤方式').setDescription('怎麼跟大家收錢，預設均攤（結算時可改）').setRequired(false)
       .addChoices(
@@ -1602,12 +1603,39 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', flags: MessageFlags.Ephemeral });
         await interaction.deferReply();
 
-        const slotMinutes = rotSnapSlot(interaction.options.getInteger('時段長度'));
-        const spanHours = Math.min(ROT_MAX_SPAN_H, Math.max(ROT_MIN_SPAN_H,
-          interaction.options.getInteger('排班時數') || ROT_SPAN_HOURS));
+        const slotMinutes = ROT_SLOT_MIN;   // 一格固定 60 分鐘
         const now = Date.now();
-        const startMs = rotAlignStart(now, slotMinutes);
-        const slotCount = Math.max(1, Math.floor((spanHours * 60) / slotMinutes));
+
+        const startRaw = interaction.options.getString('開始時間');
+        const endRaw = interaction.options.getString('結束時間');
+
+        let startMs;
+        if (startRaw) {
+          const parsed = rotParseWhen(startRaw, now);
+          if (parsed === null) {
+            return await interaction.editReply('❌ 看不懂開始時間。可以寫 \`20:00\`、\`10/28 20:00\` 或 \`2026-10-28 20:00\`。');
+          }
+          startMs = Math.floor(parsed / (slotMinutes * 60000)) * (slotMinutes * 60000);
+        } else {
+          startMs = rotAlignStart(now, slotMinutes);
+        }
+
+        let spanHours;
+        if (endRaw) {
+          let endMs = rotParseWhen(endRaw, startMs);
+          if (endMs === null) {
+            return await interaction.editReply('❌ 看不懂結束時間。可以寫 \`08:00\`、\`10/29 08:00\` 或 \`2026-10-29 08:00\`。');
+          }
+          if (endMs <= startMs) endMs += 86400000;          // 跨夜：結束比開始早就是隔天
+          spanHours = (endMs - startMs) / 3600000;
+          if (spanHours > ROT_MAX_SPAN_H) {
+            return await interaction.editReply(`❌ 一張表最長只能 ${ROT_MAX_SPAN_H} 小時，你設定的是 ${spanHours.toFixed(1)} 小時。`);
+          }
+        } else {
+          spanHours = interaction.options.getInteger('排班時數') || ROT_SPAN_HOURS;
+        }
+        spanHours = Math.min(ROT_MAX_SPAN_H, Math.max(ROT_MIN_SPAN_H, spanHours));
+        const slotCount = Math.max(1, Math.round((spanHours * 60) / slotMinutes));
         const buyPrice = parseMoneyInput(interaction.options.getString('買圖價格'));
         const splitMode = interaction.options.getString('分攤方式') === ROT_SPLIT_TIME ? ROT_SPLIT_TIME : ROT_SPLIT_EVEN;
 
@@ -1633,6 +1661,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         rot.channelId = interaction.channelId;
         rot.messageId = msg.id;
         await ref.set(rot);
+        cacheRot(ref.id, rot);
         return;
       }
 
@@ -2256,6 +2285,58 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await replyShareResult(interaction, okFlag);
       }
 
+      // ── 📺 改頻道：有排班的人都能改（頻道常常臨時換） ──
+      if (customId.startsWith('rot_chan_')) {
+        const rotId = customId.replace('rot_chan_', '');
+        const rot = await fetchRotFast(rotId);
+        if (!rot) return interaction.reply({ content: '❌ 讀不到這張排班表，請按 🔄 即時更新後再試。', flags: MessageFlags.Ephemeral });
+
+        const modal = new ModalBuilder().setCustomId(`modal_rot_chan_${rotId}`).setTitle('變更頻道');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('rot_new_chan').setLabel('新的頻道號碼')
+              .setValue(String(rot.channelNum || '')).setStyle(TextInputStyle.Short).setRequired(true)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('rot_chan_reason').setLabel('原因（選填，會一起公告）')
+              .setPlaceholder('例如：原頻被卡位、太多人').setStyle(TextInputStyle.Short).setRequired(false)
+          )
+        );
+        return await interaction.showModal(modal);
+      }
+
+      // ── ✏️ 修改內容：只有開表者與管理員 ──
+      if (customId.startsWith('rot_edit_')) {
+        const rotId = customId.replace('rot_edit_', '');
+        const rot = await fetchRotFast(rotId);
+        if (!rot) return interaction.reply({ content: '❌ 讀不到這張排班表，請按 🔄 即時更新後再試。', flags: MessageFlags.Ephemeral });
+        if (rot.creatorId !== interaction.user.id && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.reply({ content: '❌ 只有開表的人或管理員可以修改內容。頻道的話你可以按 📺 改頻道。', flags: MessageFlags.Ephemeral });
+        }
+
+        const modal = new ModalBuilder().setCustomId(`modal_rot_edit_${rotId}`).setTitle('修改排班內容');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('rot_e_map').setLabel('地圖名稱')
+              .setValue(String(rot.mapName || '')).setStyle(TextInputStyle.Short).setRequired(true)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('rot_e_note').setLabel('備註')
+              .setValue(String(rot.note || '')).setStyle(TextInputStyle.Paragraph).setRequired(false)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('rot_e_buy').setLabel('買圖價格（留空或 0 ＝ 免費團）')
+              .setValue(rot.buyPrice > 0 ? String(rot.buyPrice) : '')
+              .setPlaceholder('例如 5000w').setStyle(TextInputStyle.Short).setRequired(false)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('rot_e_split').setLabel('分攤方式：均攤 或 時間')
+              .setValue(rotSplitLabel(rot.splitMode)).setStyle(TextInputStyle.Short).setRequired(false)
+          )
+        );
+        return await interaction.showModal(modal);
+      }
+
       // ── 🗓️ 接圖排班：有收費的結算 ──
       if (customId.startsWith('rot_closepay_')) {
         const rotId = customId.replace('rot_closepay_', '');
@@ -2738,6 +2819,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await ref.update({ slots });   // colors 保留不動，之後再排回來還是同一個顏色
 
         const merged = { ...rot, slots };
+        cacheRot(rotId, merged);
         await interaction.editReply({
           embeds: [buildRotationEmbed(merged)],
           components: buildRotationComponents(rotId, merged)
@@ -2785,6 +2867,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await ref.update({ slots, colors });
 
         const merged = { ...rot, slots, colors };
+        cacheRot(rotId, merged);
         await interaction.editReply({
           embeds: [buildRotationEmbed(merged)],
           components: buildRotationComponents(rotId, merged)
@@ -3622,6 +3705,84 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // 12. 名片更新等級
       // 12. 一次更新所有角色等級
+      if (customId.startsWith('modal_rot_chan_')) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const rotId = customId.replace('modal_rot_chan_', '');
+        const ref = db.collection('map_rotations').doc(rotId);
+        const doc = await ref.get().catch(() => null);
+        if (!doc?.exists) return interaction.editReply('❌ 這張排班表已經不存在了。');
+        const rot = doc.data();
+
+        // 權限在這裡才驗：跳表單前沒辦法安全地讀資料庫
+        const hasSlot = Object.values(rot.slots || {}).some(s => s?.userId === interaction.user.id);
+        const canEdit = hasSlot || rot.creatorId === interaction.user.id
+          || isSuperAdmin(interaction.user.id, interaction.memberPermissions);
+        if (!canEdit) return interaction.editReply('❌ 只有有排到班的人、開表者或管理員可以改頻道。');
+
+        const newChan = parseInt(String(interaction.fields.getTextInputValue('rot_new_chan')).replace(/[^0-9]/g, ''));
+        if (!Number.isFinite(newChan) || newChan < 1) return interaction.editReply('❌ 頻道要填數字。');
+        if (newChan === rot.channelNum) return interaction.editReply(`💡 本來就是第 ${newChan} 頻道，沒有變動。`);
+
+        const reason = (interaction.fields.getTextInputValue('rot_chan_reason') || '').trim();
+        const oldChan = rot.channelNum;
+        await ref.update({ channelNum: newChan });
+        const merged = { ...rot, channelNum: newChan };
+        cacheRot(rotId, merged);
+        await refreshRotationMessage(rotId, merged, interaction);
+
+        // 換頻道所有人都要知道，所以公開公告並 tag 有排班的人
+        const who = [...new Set(Object.values(rot.slots || {}).map(s => s?.userId).filter(Boolean))]
+          .filter(u => u !== interaction.user.id);
+        try {
+          const ch = interaction.channel;
+          if (ch?.isTextBased()) {
+            await ch.send({
+              content: (who.length ? who.map(u => `<@${u}>`).join(' ') + '\n' : '')
+                + `📺 **【頻道變更】${rot.mapName}**　第 ${oldChan} 頻 ➔ **第 ${newChan} 頻**\n`
+                + `由 <@${interaction.user.id}> 變更${reason ? `　‧　原因：${reason}` : ''}`
+            });
+          }
+        } catch (e) { console.error('頻道變更公告失敗:', e.message); }
+
+        return interaction.editReply(`✅ 已改成第 **${newChan}** 頻道，並公告給有排班的人。`);
+      }
+
+      if (customId.startsWith('modal_rot_edit_')) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const rotId = customId.replace('modal_rot_edit_', '');
+        const ref = db.collection('map_rotations').doc(rotId);
+        const doc = await ref.get().catch(() => null);
+        if (!doc?.exists) return interaction.editReply('❌ 這張排班表已經不存在了。');
+        const rot = doc.data();
+        if (rot.creatorId !== interaction.user.id && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.editReply('❌ 只有開表的人或管理員可以修改內容。');
+        }
+        if (rot.settled) return interaction.editReply('💡 這張表已經結算完畢，不能再改了。');
+
+        const mapName = (interaction.fields.getTextInputValue('rot_e_map') || '').trim() || rot.mapName;
+        const note = (interaction.fields.getTextInputValue('rot_e_note') || '').trim() || '無特殊備註';
+        const buyPrice = parseMoneyInput(interaction.fields.getTextInputValue('rot_e_buy'));
+        const splitRaw = (interaction.fields.getTextInputValue('rot_e_split') || '').trim();
+        const splitMode = splitRaw
+          ? (/時間|time|比例/i.test(splitRaw) ? ROT_SPLIT_TIME : ROT_SPLIT_EVEN)
+          : (rot.splitMode || ROT_SPLIT_EVEN);
+
+        const changes = [];
+        if (mapName !== rot.mapName) changes.push(`地圖：${rot.mapName} ➔ ${mapName}`);
+        if (note !== rot.note) changes.push('備註已更新');
+        if (buyPrice !== (rot.buyPrice || 0)) {
+          changes.push(`買圖：${rot.buyPrice > 0 ? formatMeso(rot.buyPrice) : '免費'} ➔ ${buyPrice > 0 ? formatMeso(buyPrice) : '免費'}`);
+        }
+        if (splitMode !== rot.splitMode) changes.push(`分攤方式：${rotSplitLabel(rot.splitMode)} ➔ ${rotSplitLabel(splitMode)}`);
+        if (!changes.length) return interaction.editReply('💡 沒有任何變動。');
+
+        await ref.update({ mapName, note, buyPrice, splitMode });
+        const merged = { ...rot, mapName, note, buyPrice, splitMode };
+        cacheRot(rotId, merged);
+        await refreshRotationMessage(rotId, merged, interaction);
+        return interaction.editReply(`✅ 已更新：\n${changes.map(c => `‧ ${c}`).join('\n')}`);
+      }
+
       if (customId.startsWith('modal_rot_settle_')) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const rotId = customId.replace('modal_rot_settle_', '');
@@ -4431,21 +4592,17 @@ async function buildRaidAdminOverview(nowMs = Date.now()) {
 
 // ===================== 輪流接圖排班表 =====================
 const ROT_SPAN_HOURS = 48;          // 預設涵蓋 48 小時，開表時可自訂
-const ROT_MIN_SPAN_H = 1, ROT_MAX_SPAN_H = 168;   // 1 小時 ~ 一週
+const ROT_MIN_SPAN_H = 1, ROT_MAX_SPAN_H = 48;    // 1 ~ 48 小時
 const ROT_SPLIT_EVEN = 'even', ROT_SPLIT_TIME = 'time';
-const ROT_DEFAULT_SLOT_MIN = 60;    // 預設一格一小時，開表時可自訂
-const ROT_MAX_ROWS = 48;
-const ROT_MAX_DAYS = 5;             // 行事曆最多畫 5 直欄，再多手機就爆版了            // 表格最多畫 48 列，其餘用文字帶過
+const ROT_SLOT_MIN = 60;            // 一格固定 60 分鐘（不開放自訂）
+const ROT_DESC_BUDGET = 3200;       // 留給表格的字數，其餘讓給標題、狀態列與圖例
+const ROT_MAX_DAYS = 3;             // 48 小時最多橫跨 3 個日曆天
 const ROT_PICK_LIMIT = 25;          // Discord 下拉選單硬上限
 const ROT_PRE_NOTIFY_MS = 30 * 60000;   // 輪到自己前 30 分鐘提醒一次
 const ROT_COLORS = [31, 32, 33, 34, 35, 36];   // ANSI 前景色：紅 綠 黃 藍 洋紅 青
 const ROT_WEEKDAY = ['日', '一', '二', '三', '四', '五', '六'];
-// 時段長度必須整除 1440（一天的分鐘數），行事曆的橫列才會剛好對齊到整點
-const ROT_ALLOWED_SLOTS = [15, 20, 30, 40, 45, 60, 80, 90, 120, 180, 240];
-function rotSnapSlot(min) {
-  const m = parseInt(min) || ROT_DEFAULT_SLOT_MIN;
-  return ROT_ALLOWED_SLOTS.reduce((best, c) => Math.abs(c - m) < Math.abs(best - m) ? c : best, ROT_DEFAULT_SLOT_MIN);
-}
+// 舊資料可能有別的時段長度，所以畫表的程式仍然一律讀 rot.slotMinutes，
+// 不要寫死成 60，否則以前開的表會整個錯位。
 
 // 把起點對齊到「台北午夜起算的整格」，這樣 20:00、21:00 這種漂亮的邊界才會出現
 function rotAlignStart(nowMs, slotMinutes) {
@@ -4455,9 +4612,56 @@ function rotAlignStart(nowMs, slotMinutes) {
   return midnight + Math.floor((nowMs - midnight) / slotMs) * slotMs;
 }
 
-function rotSlotMs(rot, idx) { return rot.startMs + idx * rot.slotMinutes * 60000; }
+// 接受 "20:00"、"10/28 20:00"、"2026-10-28 20:00" 三種寫法，一律當台北時間。
+// 只給時間而該時刻已過 → 視為明天的同一時刻（半夜開表說「08:00」指的是早上）。
+function rotParseWhen(input, nowMs = Date.now(), assumeFuture = true) {
+  const raw = String(input || '').trim();
+  if (!raw) return null;
+  const t = tpeToday(nowMs);
+
+  let y = t.year, mo = t.month, d = t.day, hh = null, mi = 0;
+  let m = raw.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})[\s　]+(\d{1,2}):(\d{2})$/);
+  if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; hh = +m[4]; mi = +m[5]; }
+  if (hh === null) {
+    m = raw.match(/^(\d{1,2})[-/.](\d{1,2})[\s　]+(\d{1,2}):(\d{2})$/);
+    if (m) { mo = +m[1]; d = +m[2]; hh = +m[3]; mi = +m[4]; }
+  }
+  if (hh === null) {
+    m = raw.match(/^(\d{1,2}):(\d{2})$/);
+    if (m) { hh = +m[1]; mi = +m[2]; }
+  }
+  if (hh === null || hh > 23 || mi > 59 || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+
+  let ms = tpeWallClockToMs(y, mo, d, hh, mi);
+  // 只填了時間、而且那個時刻今天已經過了 → 算明天
+  if (assumeFuture && /^\d{1,2}:\d{2}$/.test(raw) && ms <= nowMs) ms += 86400000;
+  return ms;
+}
+
+// 跳表單前不能 defer（Discord 規定），但表單要預填現有內容就得先讀資料庫。
+// 所以排班表也做一層快取：讀過就記著，寫入時更新，跳表單時直接拿。
+const ROT_CACHE = new Map();
+function cacheRot(id, data) { if (id && data) ROT_CACHE.set(id, { data, at: Date.now() }); }
+async function fetchRotFast(id) {
+  const hit = ROT_CACHE.get(id);
+  if (hit && Date.now() - hit.at < 120000) return hit.data;
+  if (!db) return null;
+  try {
+    const doc = await withTimeout(db.collection('map_rotations').doc(id).get(), 2200);
+    if (!doc?.exists) return null;
+    cacheRot(id, doc.data());
+    return doc.data();
+  } catch (e) {
+    console.error('讀取排班表失敗:', e.message);
+    return hit?.data || null;
+  }
+}
+
+// 一律透過這個取時段長度：萬一舊資料缺了這個欄位，整張表會變成空白卻不報錯
+function rotSlotLen(rot) { return (parseInt(rot?.slotMinutes) || ROT_SLOT_MIN); }
+function rotSlotMs(rot, idx) { return rot.startMs + idx * rotSlotLen(rot) * 60000; }
 function rotCurrentIndex(rot, nowMs = Date.now()) {
-  return Math.floor((nowMs - rot.startMs) / (rot.slotMinutes * 60000));
+  return Math.floor((nowMs - rot.startMs) / (rotSlotLen(rot) * 60000));
 }
 function rotSlotOf(rot, idx) { return (rot.slots || {})[String(idx)] || null; }
 
@@ -4474,7 +4678,7 @@ function rotDayKey(ms) {
   return `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
 }
 function rotSlotLabel(rot, idx) {
-  const a = rotSlotMs(rot, idx), b = a + rot.slotMinutes * 60000;
+  const a = rotSlotMs(rot, idx), b = a + rotSlotLen(rot) * 60000;
   return `${rotTimeLabel(a)} ~ ${rotTimeLabel(b)}`;
 }
 
@@ -4527,78 +4731,79 @@ function tpeMidnight(ms) {
   return tpeWallClockToMs(t.year, t.month, t.day, 0, 0);
 }
 
-// 把排班表畫成行事曆：直欄是日期、橫列是時段，格子用顏色區分是誰
+// 把排班表畫成行事曆：直欄是日期、橫列是時段，格子用顏色區分是誰。
+// 預設把每一列都畫出來；只有在內容會撐破 embed 的 4096 字上限時才退讓。
 function rotRenderGrid(rot, nowMs = Date.now()) {
-  const slotMs = rot.slotMinutes * 60000;
-  const rowsPerDay = Math.round(1440 / rot.slotMinutes);
+  const slotMs = rotSlotLen(rot) * 60000;
+  const rowsPerDay = Math.round(1440 / rotSlotLen(rot));
   const endMs = rot.startMs + rot.slotCount * slotMs;
   const colors = rotColorMap(rot);
   const curIdx = rotCurrentIndex(rot, nowMs);
 
   const days = [];
   for (let d = tpeMidnight(rot.startMs); d < endMs; d += 86400000) days.push(d);
-  // 欄位太多手機會爆版，也會撐破 embed 的 4096 字上限
   const hiddenDays = Math.max(0, days.length - ROT_MAX_DAYS);
   if (hiddenDays) days.length = ROT_MAX_DAYS;
 
   const TIME_W = 7, CELL_W = 6;
-  let head = padCell('', TIME_W);
-  let head2 = padCell('', TIME_W);
+  let head = padCell('', TIME_W), head2 = padCell('', TIME_W);
   days.forEach(d => {
-    head += padCell(rotDayLabel(d).split(' ')[0], CELL_W);
-    head2 += padCell(rotDayLabel(d).split(' ')[1] || '', CELL_W);
+    const [date, wk] = rotDayLabel(d).split(' ');
+    head += padCell(date, CELL_W);
+    head2 += padCell(wk || '', CELL_W);
   });
 
-  // 先把每一列算出來，再決定要不要把整段空白列折疊起來
   const rows = [];
   for (let r = 0; r < rowsPerDay; r++) {
     const cells = days.map(d => {
-      const ms = d + r * slotMs;
-      const idx = Math.round((ms - rot.startMs) / slotMs);
+      const idx = Math.round((d + r * slotMs - rot.startMs) / slotMs);
       if (idx < 0 || idx >= rot.slotCount) return { kind: 'out' };
       const s = rotSlotOf(rot, idx);
       if (!s) return { kind: 'free', idx, now: idx === curIdx };
       return { kind: 'busy', idx, s, past: idx < curIdx, now: idx === curIdx };
     });
-    rows.push({ r, time: rotTimeLabel(rot.startMs - (rot.startMs % slotMs) + r * slotMs), cells });
+    rows.push({ r, time: rotTimeLabel(tpeMidnight(rot.startMs) + r * slotMs), cells });
   }
-  // time 以當日 00:00 起算比較直觀
-  rows.forEach(row => { row.time = rotTimeLabel(tpeMidnight(rot.startMs) + row.r * slotMs); });
 
-  // 「現在」那一列永遠不折疊，否則 ▶ 標記會被藏起來，看不出自己在時間軸的哪裡
-  const emptyRow = (row) => row.cells.every(c => c.kind !== 'busy' && !c.now);
-  const collapse = rowsPerDay > 26;   // 一格 < 60 分鐘才折疊，不然整張表會太長
-
-  let table = '```ansi\n';
-  table += `\u001b[1;30m${head}\u001b[0m\n`;
-  if (head2.trim()) table += `\u001b[30m${head2}\u001b[0m\n`;
-
-  let r = 0;
-  while (r < rows.length) {
-    if (collapse && emptyRow(rows[r])) {
-      let j = r;
-      while (j < rows.length && emptyRow(rows[j])) j++;
-      if (j - r >= 2) {
-        table += `\u001b[30m${padCell('  ⋯', TIME_W)}（${j - r} 列全空）\u001b[0m\n`;
-        r = j; continue;
-      }
-    }
-    const row = rows[r];
-    const isNow = row.cells.some(c => c.now);
-    let line = (isNow ? '\u001b[1;37m▶\u001b[0m' : ' ') + padCell(row.time, TIME_W - 1);
+  // 同一列若連續幾格顏色相同，色碼只送一次 —— ANSI escape 也算進 4096 字裡，
+  // 一格一組色碼的話 15 分鐘切法直接爆掉。
+  const renderRow = (row) => {
+    let line = (row.cells.some(c => c.now) ? '\u001b[1;37m▶\u001b[0m' : ' ') + padCell(row.time, TIME_W - 1);
+    let cur = null;
     row.cells.forEach(c => {
-      if (c.kind === 'out') line += `\u001b[30m${padCell('·', CELL_W)}\u001b[0m`;
-      else if (c.kind === 'free') line += `\u001b[30m${padCell('░░', CELL_W)}\u001b[0m`;
-      else {
-        const col = c.past ? 30 : (colors.get(c.s.userId) || 37);
-        line += `\u001b[${col}m${padCell('██' + rotTag(c.s.ign), CELL_W)}\u001b[0m`;
-      }
+      let col, text;
+      if (c.kind === 'out') { col = 30; text = padCell('·', CELL_W); }
+      else if (c.kind === 'free') { col = 30; text = padCell('░░', CELL_W); }
+      else { col = c.past ? 30 : (colors.get(c.s.userId) || 37); text = padCell('██' + rotTag(c.s.ign), CELL_W); }
+      if (col !== cur) { line += `\u001b[${col}m`; cur = col; }
+      line += text;
     });
-    table += line + '\n';
-    r++;
-  }
-  table += '```';
-  if (hiddenDays) table += `\n*…後面還有 ${hiddenDays} 天沒畫出來，用下拉選單一樣排得到*`;
+    return line + '\u001b[0m\n';
+  };
+
+  const emptyRow = (row) => row.cells.every(c => c.kind !== 'busy' && !c.now);
+
+  const render = (collapse, maxRows) => {
+    let t = '```ansi\n' + `\u001b[1;30m${head}\u001b[0m\n`;
+    if (head2.trim()) t += `\u001b[30m${head2}\u001b[0m\n`;
+    let i = 0, lines = 0, skipped = 0;
+    while (i < rows.length) {
+      if (lines >= maxRows) { skipped += rows.length - i; break; }
+      if (collapse && emptyRow(rows[i])) {
+        let j = i;
+        while (j < rows.length && emptyRow(rows[j])) j++;
+        if (j - i >= 2) {
+          t += `\u001b[30m${padCell('  ⋯', TIME_W)}（${j - i} 列全空）\u001b[0m\n`;
+          i = j; lines++; continue;
+        }
+      }
+      t += renderRow(rows[i]); i++; lines++;
+    }
+    t += '```';
+    if (skipped) t += `\n*…還有 ${skipped} 列放不下，用下拉選單一樣排得到*`;
+    if (hiddenDays) t += `\n*…後面還有 ${hiddenDays} 天沒畫出來*`;
+    return t;
+  };
 
   // 圖例：顏色只有六種，光看色塊認不出人，一定要有對照表
   const seen = [];
@@ -4610,6 +4815,13 @@ function rotRenderGrid(rot, nowMs = Date.now()) {
     ? '\n```ansi\n' + seen.map(s =>
         `\u001b[${colors.get(s.userId) || 37}m██ ${rotTag(s.ign)}\u001b[0m = ${s.ign}`).join('\n') + '\n```'
     : '';
+
+  // 先試「全部畫出來」，裝不下才依序退讓。ROT_DESC_BUDGET 留給標題、狀態列與圖例。
+  const budget = ROT_DESC_BUDGET - legend.length;
+  let table = render(false, 999);
+  if (table.length > budget) table = render(true, 999);
+  if (table.length > budget) table = render(true, 60);
+  if (table.length > budget) table = render(true, 30);
 
   return { table, legend };
 }
@@ -4739,6 +4951,10 @@ function buildRotationEmbed(rot, nowMs = Date.now()) {
     status += `\n⏭️ 下一棒：<@${nxt.userId}>（\`${nxt.ign}\`）<t:${Math.floor(rotSlotMs(rot, nextIdx) / 1000)}:t> 交接`;
   }
 
+  const endAll = rotSlotMs(rot, rot.slotCount);
+  const range = `🕒 <t:${Math.floor(rot.startMs / 1000)}:f> ~ <t:${Math.floor(endAll / 1000)}:t>`
+    + `　（共 ${Math.round((endAll - rot.startMs) / 3600000 * 10) / 10} 小時）\n`;
+
   const money = rot.buyPrice > 0
     ? `💰 買圖 ${formatMeso(rot.buyPrice)}　‧　${rotSplitLabel(rot.splitMode)}　‧　墊付：<@${rot.creatorId}>\n`
     : '';
@@ -4747,10 +4963,10 @@ function buildRotationEmbed(rot, nowMs = Date.now()) {
     .setColor(rot.isClosed ? 0x95A5A6 : (cur ? 0x57F287 : 0xF1C40F))
     .setTitle(`🗓️【輪流接圖】${rot.mapName}　‧　第 ${rot.channelNum} 頻道`)
     .setDescription(
-      `📌 ${rot.note || '無特殊備註'}\n${money}` +
+      `📌 ${rot.note || '無特殊備註'}\n${range}${money}` +
       `${PANEL_DIV}\n${status}\n\n${table}${legend}`
     )
-    .setFooter({ text: `一格 ${rot.slotMinutes} 分鐘　‧　已排 ${taken} 格　‧　還空 ${emptyCount} 格　‧　· 表示不在排班範圍` });
+    .setFooter({ text: `一格 ${rotSlotLen(rot)} 分鐘　‧　已排 ${taken} 格　‧　還空 ${emptyCount} 格　‧　· 表示不在排班範圍` });
 
   if (rot.creatorTag) {
     embed.setAuthor({ name: `發起人：${rot.creatorTag}`, iconURL: rot.creatorAvatar || undefined });
@@ -4774,6 +4990,8 @@ function buildRotationComponents(rotId, rot, nowMs = Date.now()) {
 
   const rows = [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`rot_refresh_${rotId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`rot_chan_${rotId}`).setLabel('📺 改頻道').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`rot_edit_${rotId}`).setLabel('✏️ 修改內容').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`share_rot_${rotId}`).setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary),
     // 有收費的團按下去要先跳表單問賣價，而跳表單前不能 defer，
     // 所以用兩種 customId 讓處理器在「還沒讀資料庫」前就知道要走哪條路。

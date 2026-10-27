@@ -878,8 +878,8 @@ const commands = [
     .setName('接圖排班')
     .setDescription('開一張 48 小時的輪流接圖表，大家自己認領時段')
     .addStringOption(o => o.setName('地圖名稱').setDescription('例如：忘卻6、蛋龍').setRequired(true))
-    .addIntegerOption(o => o.setName('頻道').setDescription('頻道號碼').setRequired(true).setMinValue(1))
     .addStringOption(o => o.setName('備註').setDescription('例如：連打不洗頻、提前5分鐘到場').setRequired(false))
+    .addIntegerOption(o => o.setName('頻道').setDescription('還沒決定可以不填，之後用「📺 改頻道」補').setRequired(false).setMinValue(1))
     .addStringOption(o => o.setName('開始時間').setDescription('例如 20:00 或 10/28 20:00，不填＝現在').setRequired(false))
     .addStringOption(o => o.setName('結束時間').setDescription('例如 08:00 或 10/29 08:00，不填就用「排班時數」').setRequired(false))
     .addIntegerOption(o => o.setName('排班時數').setDescription('沒填結束時間時用這個，1 ~ 48，預設 48').setRequired(false).setMinValue(1).setMaxValue(48))
@@ -1129,7 +1129,7 @@ client.once(Events.ClientReady, async () => {
           if (!ch2?.isTextBased()) continue;
           await ch2.send({
             content: `⏰ <@${sl.userId}> 快輪到你了（<t:${Math.floor(rotSlotMs(rot, k) / 1000)}:R>）！\n` +
-              `🗺️ **${rot.mapName}** 第 ${rot.channelNum} 頻道　‧　` +
+              `🗺️ **${rot.mapName}** ${rotChanLabel(rot)}　‧　` +
               `${rotDayLabel(rotSlotMs(rot, k))} ${rotSlotLabel(rot, k)}`
           }).catch(() => {});
         }
@@ -1149,7 +1149,7 @@ client.once(Events.ClientReady, async () => {
         for (let i = idx + 1; i < rot.slotCount; i++) { if (rotSlotOf(rot, i)) { nextIdx = i; break; } }
         const prev = rotSlotOf(rot, idx - 1);
         await ch.send({
-          content: `🔔 **【接圖交接】${rot.mapName} 第 ${rot.channelNum} 頻道**\n` +
+          content: `🔔 **【接圖交接】${rot.mapName} ${rotChanLabel(rot)}**\n` +
             `輪到 <@${cur.userId}>（\`${cur.ign}\`）了！` +
             (prev ? `　上一棒：<@${prev.userId}>` : '') +
             (nextIdx >= 0
@@ -1646,7 +1646,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           creatorTag: interaction.member?.displayName || interaction.user.username,
           creatorAvatar: interaction.user.displayAvatarURL(),
           mapName: interaction.options.getString('地圖名稱'),
-          channelNum: interaction.options.getInteger('頻道'),
+          channelNum: interaction.options.getInteger('頻道') || 0,   // 0 = 還沒決定
           note: interaction.options.getString('備註') || '無特殊備註',
           slotMinutes, startMs, slotCount, spanHours,
           buyPrice, splitMode, sellPrice: 0, settled: false,
@@ -3738,7 +3738,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (ch?.isTextBased()) {
             await ch.send({
               content: (who.length ? who.map(u => `<@${u}>`).join(' ') + '\n' : '')
-                + `📺 **【頻道變更】${rot.mapName}**　第 ${oldChan} 頻 ➔ **第 ${newChan} 頻**\n`
+                + (oldChan > 0
+                    ? `📺 **【頻道變更】${rot.mapName}**　第 ${oldChan} 頻 ➔ **第 ${newChan} 頻**\n`
+                    : `📺 **【頻道確定】${rot.mapName}**　➔ **第 ${newChan} 頻**\n`)
                 + `由 <@${interaction.user.id}> 變更${reason ? `　‧　原因：${reason}` : ''}`
             });
           }
@@ -4659,6 +4661,10 @@ async function fetchRotFast(id) {
 
 // 一律透過這個取時段長度：萬一舊資料缺了這個欄位，整張表會變成空白卻不報錯
 function rotSlotLen(rot) { return (parseInt(rot?.slotMinutes) || ROT_SLOT_MIN); }
+// 提前開表時頻道常常還沒決定，所以 0 要顯示成「頻道未定」而不是「第 0 頻道」
+function rotChanLabel(rot) {
+  return rot?.channelNum > 0 ? `第 ${rot.channelNum} 頻道` : '頻道未定';
+}
 function rotSlotMs(rot, idx) { return rot.startMs + idx * rotSlotLen(rot) * 60000; }
 function rotCurrentIndex(rot, nowMs = Date.now()) {
   return Math.floor((nowMs - rot.startMs) / (rotSlotLen(rot) * 60000));
@@ -4865,7 +4871,7 @@ function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
   const parts = rotParticipants(rot, nowMs);
   const net = (rot.buyPrice || 0) - (rot.sellPrice || 0);
   const profit = net < 0;
-  const header = `💰【接圖結算】${rot.mapName}　‧　第 ${rot.channelNum} 頻道`;
+  const header = `💰【接圖結算】${rot.mapName}　‧　${rotChanLabel(rot)}`;
 
   if (!parts.length) {
     return {
@@ -4955,15 +4961,22 @@ function buildRotationEmbed(rot, nowMs = Date.now()) {
   const range = `🕒 <t:${Math.floor(rot.startMs / 1000)}:f> ~ <t:${Math.floor(endAll / 1000)}:t>`
     + `　（共 ${Math.round((endAll - rot.startMs) / 3600000 * 10) / 10} 小時）\n`;
 
+  const pending = [];
+  if (!(rot.channelNum > 0)) pending.push('頻道');
+  if (!(rot.buyPrice > 0)) pending.push('買圖價格');
+  const todo = (pending.length && !rot.isClosed)
+    ? `⚠️ 尚未填：**${pending.join('、')}**（頻道用 📺 改頻道，價格用 ✏️ 修改內容）\n`
+    : '';
+
   const money = rot.buyPrice > 0
     ? `💰 買圖 ${formatMeso(rot.buyPrice)}　‧　${rotSplitLabel(rot.splitMode)}　‧　墊付：<@${rot.creatorId}>\n`
     : '';
 
   const embed = new EmbedBuilder()
     .setColor(rot.isClosed ? 0x95A5A6 : (cur ? 0x57F287 : 0xF1C40F))
-    .setTitle(`🗓️【輪流接圖】${rot.mapName}　‧　第 ${rot.channelNum} 頻道`)
+    .setTitle(`🗓️【輪流接圖】${rot.mapName}　‧　${rotChanLabel(rot)}`)
     .setDescription(
-      `📌 ${rot.note || '無特殊備註'}\n${range}${money}` +
+      `📌 ${rot.note || '無特殊備註'}\n${range}${money}${todo}` +
       `${PANEL_DIV}\n${status}\n\n${table}${legend}`
     )
     .setFooter({ text: `一格 ${rotSlotLen(rot)} 分鐘　‧　已排 ${taken} 格　‧　還空 ${emptyCount} 格　‧　· 表示不在排班範圍` });

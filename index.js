@@ -880,7 +880,14 @@ const commands = [
     .addStringOption(o => o.setName('地圖名稱').setDescription('例如：忘卻6、蛋龍').setRequired(true))
     .addIntegerOption(o => o.setName('頻道').setDescription('頻道號碼').setRequired(true).setMinValue(1))
     .addStringOption(o => o.setName('備註').setDescription('例如：連打不洗頻、提前5分鐘到場').setRequired(false))
-    .addIntegerOption(o => o.setName('時段長度').setDescription('一格幾分鐘，預設 60').setRequired(false).setMinValue(15).setMaxValue(240)),
+    .addIntegerOption(o => o.setName('時段長度').setDescription('一格幾分鐘，預設 60').setRequired(false).setMinValue(15).setMaxValue(240))
+    .addIntegerOption(o => o.setName('排班時數').setDescription('這張表要排幾小時，預設 48（最多 168）').setRequired(false).setMinValue(1).setMaxValue(168))
+    .addStringOption(o => o.setName('買圖價格').setDescription('這張圖花多少錢，例如 5000w。不填＝免費團').setRequired(false))
+    .addStringOption(o => o.setName('分攤方式').setDescription('怎麼跟大家收錢，預設均攤（結算時可改）').setRequired(false)
+      .addChoices(
+        { name: '均攤 — 有打的人平均分', value: 'even' },
+        { name: '按時間攤 — 依各自佔的時段比例', value: 'time' }
+      )),
 
   new SlashCommandBuilder()
     .setName('幸運頻道')
@@ -1596,9 +1603,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.deferReply();
 
         const slotMinutes = rotSnapSlot(interaction.options.getInteger('時段長度'));
+        const spanHours = Math.min(ROT_MAX_SPAN_H, Math.max(ROT_MIN_SPAN_H,
+          interaction.options.getInteger('排班時數') || ROT_SPAN_HOURS));
         const now = Date.now();
         const startMs = rotAlignStart(now, slotMinutes);
-        const slotCount = Math.floor((ROT_SPAN_HOURS * 60) / slotMinutes);
+        const slotCount = Math.max(1, Math.floor((spanHours * 60) / slotMinutes));
+        const buyPrice = parseMoneyInput(interaction.options.getString('買圖價格'));
+        const splitMode = interaction.options.getString('分攤方式') === ROT_SPLIT_TIME ? ROT_SPLIT_TIME : ROT_SPLIT_EVEN;
 
         const ref = db.collection('map_rotations').doc();
         const rot = {
@@ -1609,7 +1620,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           mapName: interaction.options.getString('地圖名稱'),
           channelNum: interaction.options.getInteger('頻道'),
           note: interaction.options.getString('備註') || '無特殊備註',
-          slotMinutes, startMs, slotCount,
+          slotMinutes, startMs, slotCount, spanHours,
+          buyPrice, splitMode, sellPrice: 0, settled: false,
           slots: {}, colors: {}, isClosed: false, notifiedIdx: -1, preNotified: [],
           createdAt: admin.firestore.FieldValue.serverTimestamp()
         };
@@ -2244,7 +2256,42 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await replyShareResult(interaction, okFlag);
       }
 
-      // ── 🗓️ 接圖排班 ──
+      // ── 🗓️ 接圖排班：有收費的結算 ──
+      if (customId.startsWith('rot_closepay_')) {
+        const rotId = customId.replace('rot_closepay_', '');
+        const modal = new ModalBuilder().setCustomId(`modal_rot_settle_${rotId}`).setTitle('結束並結算');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('rot_sell_price')
+              .setLabel('賣出價格（沒賣掉就留空）')
+              .setPlaceholder('例如 3000w、1.2e')
+              .setStyle(TextInputStyle.Short).setRequired(false)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('rot_split_mode')
+              .setLabel('分攤方式：填「均攤」或「時間」')
+              .setPlaceholder('均攤 = 每人一樣多　‧　時間 = 依佔的時段比例')
+              .setStyle(TextInputStyle.Short).setRequired(false)
+          )
+        );
+        return await interaction.showModal(modal);
+      }
+
+      if (customId.startsWith('rot_profit_')) {
+        await interaction.deferUpdate();
+        const share = customId.startsWith('rot_profit_share_');
+        const rotId = customId.replace(share ? 'rot_profit_share_' : 'rot_profit_keep_', '');
+        const ref = db.collection('map_rotations').doc(rotId);
+        const doc = await ref.get().catch(() => null);
+        if (!doc?.exists) return await interaction.followUp({ content: '❌ 這張排班表已經不存在了。', flags: MessageFlags.Ephemeral });
+        const rot = doc.data();
+        if (rot.creatorId !== interaction.user.id && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return await interaction.followUp({ content: '❌ 只有開表的人可以決定。', flags: MessageFlags.Ephemeral });
+        }
+        await ref.update({ isClosed: true, settled: true, shareProfit: share });
+        return await rotPostSettlement(interaction, rotId, { ...rot, isClosed: true, settled: true }, share);
+      }
+
       if (customId.startsWith('rot_refresh_') || customId.startsWith('rot_close_')) {
         await interaction.deferUpdate();
         const closing = customId.startsWith('rot_close_');
@@ -3575,6 +3622,46 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // 12. 名片更新等級
       // 12. 一次更新所有角色等級
+      if (customId.startsWith('modal_rot_settle_')) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const rotId = customId.replace('modal_rot_settle_', '');
+        const ref = db.collection('map_rotations').doc(rotId);
+        const doc = await ref.get().catch(() => null);
+        if (!doc?.exists) return interaction.editReply('❌ 這張排班表已經不存在了。');
+        const rot = doc.data();
+
+        if (rot.creatorId !== interaction.user.id && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.editReply('❌ 只有開表的人或管理員可以結算。');
+        }
+        if (rot.settled) return interaction.editReply('💡 這張表已經結算過了。');
+
+        const sellPrice = parseMoneyInput(interaction.fields.getTextInputValue('rot_sell_price'));
+        const modeRaw = (interaction.fields.getTextInputValue('rot_split_mode') || '').trim();
+        const splitMode = modeRaw
+          ? (/時間|time|比例/i.test(modeRaw) ? ROT_SPLIT_TIME : ROT_SPLIT_EVEN)
+          : (rot.splitMode || ROT_SPLIT_EVEN);
+
+        const merged = { ...rot, sellPrice, splitMode };
+        const net = (merged.buyPrice || 0) - sellPrice;
+
+        // 賣得比買得貴 → 問開表者要不要把賺的分給大家
+        if (net < 0) {
+          await ref.update({ sellPrice, splitMode });
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`rot_profit_share_${rotId}`).setLabel('💸 分給大家').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`rot_profit_keep_${rotId}`).setLabel('🙅 我自己留').setStyle(ButtonStyle.Secondary)
+          );
+          return await interaction.editReply({
+            content: `💹 這趟**轉手賺了 ${formatMeso(-net)}**（買 ${formatMeso(merged.buyPrice)}、賣 ${formatMeso(sellPrice)}）。\n`
+              + '要把賺的分給有打的人嗎？選完才會公開結算。',
+            components: [row]
+          });
+        }
+
+        await ref.update({ sellPrice, splitMode, isClosed: true, settled: true, shareProfit: true });
+        return await rotPostSettlement(interaction, rotId, { ...merged, isClosed: true, settled: true }, true);
+      }
+
       if (customId === 'modal_del_search_ign') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
@@ -4343,9 +4430,12 @@ async function buildRaidAdminOverview(nowMs = Date.now()) {
 }
 
 // ===================== 輪流接圖排班表 =====================
-const ROT_SPAN_HOURS = 48;          // 一張表涵蓋 48 小時
+const ROT_SPAN_HOURS = 48;          // 預設涵蓋 48 小時，開表時可自訂
+const ROT_MIN_SPAN_H = 1, ROT_MAX_SPAN_H = 168;   // 1 小時 ~ 一週
+const ROT_SPLIT_EVEN = 'even', ROT_SPLIT_TIME = 'time';
 const ROT_DEFAULT_SLOT_MIN = 60;    // 預設一格一小時，開表時可自訂
-const ROT_MAX_ROWS = 48;            // 表格最多畫 48 列，其餘用文字帶過
+const ROT_MAX_ROWS = 48;
+const ROT_MAX_DAYS = 5;             // 行事曆最多畫 5 直欄，再多手機就爆版了            // 表格最多畫 48 列，其餘用文字帶過
 const ROT_PICK_LIMIT = 25;          // Discord 下拉選單硬上限
 const ROT_PRE_NOTIFY_MS = 30 * 60000;   // 輪到自己前 30 分鐘提醒一次
 const ROT_COLORS = [31, 32, 33, 34, 35, 36];   // ANSI 前景色：紅 綠 黃 藍 洋紅 青
@@ -4447,6 +4537,9 @@ function rotRenderGrid(rot, nowMs = Date.now()) {
 
   const days = [];
   for (let d = tpeMidnight(rot.startMs); d < endMs; d += 86400000) days.push(d);
+  // 欄位太多手機會爆版，也會撐破 embed 的 4096 字上限
+  const hiddenDays = Math.max(0, days.length - ROT_MAX_DAYS);
+  if (hiddenDays) days.length = ROT_MAX_DAYS;
 
   const TIME_W = 7, CELL_W = 6;
   let head = padCell('', TIME_W);
@@ -4505,6 +4598,7 @@ function rotRenderGrid(rot, nowMs = Date.now()) {
     r++;
   }
   table += '```';
+  if (hiddenDays) table += `\n*…後面還有 ${hiddenDays} 天沒畫出來，用下拉選單一樣排得到*`;
 
   // 圖例：顏色只有六種，光看色塊認不出人，一定要有對照表
   const seen = [];
@@ -4518,6 +4612,109 @@ function rotRenderGrid(rot, nowMs = Date.now()) {
     : '';
 
   return { table, legend };
+}
+
+// 把一筆金額依「均攤」或「按時間攤」分給參與者，並處理整數進位的零頭。
+// 零頭全丟給最後一個人，這樣每個人的數字相加一定等於總額，對帳不會差一塊錢。
+function rotSplitAmount(total, rows, mode) {
+  const n = rows.length;
+  if (!n) return [];
+  const totalSlots = rows.reduce((a, r) => a + r.slots, 0) || 1;
+  const sign = total < 0 ? -1 : 1;
+  const abs = Math.abs(total);
+
+  const out = rows.map(r => {
+    const raw = mode === ROT_SPLIT_TIME ? abs * (r.slots / totalSlots) : abs / n;
+    return { ...r, amount: Math.floor(raw) };
+  });
+  const used = out.reduce((a, r) => a + r.amount, 0);
+  out[out.length - 1].amount += (abs - used);        // 零頭
+  return out.map(r => ({ ...r, amount: r.amount * sign }));
+}
+
+// 誰算「有打的人」：只算已經開始的時段。提前收工時，還沒輪到的人不用付錢。
+function rotParticipants(rot, nowMs = Date.now()) {
+  const byUser = new Map();
+  for (let i = 0; i < rot.slotCount; i++) {
+    if (rotSlotMs(rot, i) > nowMs) break;            // 格子照時間遞增
+    const s = rotSlotOf(rot, i);
+    if (!s) continue;
+    const hit = byUser.get(s.userId) || { userId: s.userId, ign: s.ign, slots: 0 };
+    hit.slots++; hit.ign = s.ign;
+    byUser.set(s.userId, hit);
+  }
+  return [...byUser.values()].sort((a, b) => b.slots - a.slots || a.ign.localeCompare(b.ign));
+}
+
+function rotSplitLabel(mode) { return mode === ROT_SPLIT_TIME ? '按時間攤' : '均攤'; }
+
+// 產生接圖結算報告。shareProfit 只有在「賣價 > 買價」時才有意義。
+function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
+  const parts = rotParticipants(rot, nowMs);
+  const net = (rot.buyPrice || 0) - (rot.sellPrice || 0);
+  const profit = net < 0;
+  const header = `💰【接圖結算】${rot.mapName}　‧　第 ${rot.channelNum} 頻道`;
+
+  if (!parts.length) {
+    return {
+      embed: new EmbedBuilder().setColor(0x95A5A6).setTitle(header)
+        .setDescription('這張表沒有任何人排到已開始的時段，沒有費用要分攤。'),
+      mentions: []
+    };
+  }
+
+  const priceLine = rot.sellPrice > 0
+    ? `買圖 ${formatMeso(rot.buyPrice)} − 賣出 ${formatMeso(rot.sellPrice)} = `
+      + (profit ? `**轉手賺 ${formatMeso(-net)}**` : `**淨成本 ${formatMeso(net)}**`)
+    : `買圖 **${formatMeso(rot.buyPrice)}**（沒有賣出）`;
+
+  // 賺錢而開表者選擇不分：大家不用付，報告只交代結果
+  if (profit && !shareProfit) {
+    return {
+      embed: new EmbedBuilder().setColor(0x57F287).setTitle(header)
+        .setDescription(
+          `${priceLine}\n${PANEL_DIV}\n` +
+          `這趟是賺的，<@${rot.creatorId}> 決定不分攤 —— **大家都不用付錢**。\n` +
+          `參與者：${parts.map(p => `<@${p.userId}>`).join('、')}`
+        ),
+      mentions: []
+    };
+  }
+
+  const rowsWithAmt = rotSplitAmount(net, parts, rot.splitMode);
+  const totalSlots = parts.reduce((a, p) => a + p.slots, 0) || 1;
+  const nameW = Math.min(14, Math.max(...rowsWithAmt.map(r => dispWidth(r.ign))));
+
+  // 表頭要用跟資料列同一套寬度計算，否則中文名字一長就會錯開
+  let body = '\u001b[1;36m ' + padCell('參與者', nameW + 2) + padCell('時段', 12)
+    + (profit ? '應領' : '應付') + '\u001b[0m\n';
+  rowsWithAmt.forEach(r => {
+    const pct = (r.slots / totalSlots * 100).toFixed(1);
+    const isOwner = r.userId === rot.creatorId;
+    body += ` ${padCell(r.ign, nameW + 2)}${padCell(`${r.slots} 格 ${pct}%`, 12)}`
+      + `\u001b[${profit ? 32 : 33}m${formatMeso(Math.abs(r.amount))}\u001b[0m`
+      + (isOwner ? ' \u001b[30m(墊付人)\u001b[0m' : '') + '\n';
+  });
+
+  const ownerRow = rowsWithAmt.find(r => r.userId === rot.creatorId);
+  const ownerShare = ownerRow ? Math.abs(ownerRow.amount) : 0;
+  const collect = Math.abs(net) - ownerShare;
+
+  const table = '\u0060\u0060\u0060ansi\n' + body + '\u0060\u0060\u0060';
+  const action = profit
+    ? `<@${rot.creatorId}> 請把上面的金額**發給**每一位（自己那份留著），共需發出 **${formatMeso(collect)}**。`
+    : `請把上面的金額**匯給** <@${rot.creatorId}>。他自己那份不用匯，實際可收回 **${formatMeso(collect)}**。`;
+
+  const embed = new EmbedBuilder()
+    .setColor(profit ? 0x57F287 : 0xF1C40F)
+    .setTitle(header)
+    .setDescription(
+      `${priceLine}\n分攤方式：**${rotSplitLabel(rot.splitMode)}**　‧　共 ${totalSlots} 格 ‧ ${parts.length} 人\n` +
+      `${PANEL_DIV}\n${table}\n${action}`
+    )
+    .setFooter({ text: `結算於 ${rotDayLabel(nowMs)} ${tpeClock(nowMs)}　‧　只計入已開始的時段` });
+
+  return { embed, mentions: parts.filter(p => p.userId !== rot.creatorId).map(p => p.userId) };
 }
 
 function buildRotationEmbed(rot, nowMs = Date.now()) {
@@ -4542,11 +4739,15 @@ function buildRotationEmbed(rot, nowMs = Date.now()) {
     status += `\n⏭️ 下一棒：<@${nxt.userId}>（\`${nxt.ign}\`）<t:${Math.floor(rotSlotMs(rot, nextIdx) / 1000)}:t> 交接`;
   }
 
+  const money = rot.buyPrice > 0
+    ? `💰 買圖 ${formatMeso(rot.buyPrice)}　‧　${rotSplitLabel(rot.splitMode)}　‧　墊付：<@${rot.creatorId}>\n`
+    : '';
+
   const embed = new EmbedBuilder()
     .setColor(rot.isClosed ? 0x95A5A6 : (cur ? 0x57F287 : 0xF1C40F))
     .setTitle(`🗓️【輪流接圖】${rot.mapName}　‧　第 ${rot.channelNum} 頻道`)
     .setDescription(
-      `📌 ${rot.note || '無特殊備註'}\n` +
+      `📌 ${rot.note || '無特殊備註'}\n${money}` +
       `${PANEL_DIV}\n${status}\n\n${table}${legend}`
     )
     .setFooter({ text: `一格 ${rot.slotMinutes} 分鐘　‧　已排 ${taken} 格　‧　還空 ${emptyCount} 格　‧　· 表示不在排班範圍` });
@@ -4559,15 +4760,26 @@ function buildRotationEmbed(rot, nowMs = Date.now()) {
 
 function buildRotationComponents(rotId, rot, nowMs = Date.now()) {
   if (rot.isClosed || rotCurrentIndex(rot, nowMs) >= rot.slotCount) {
-    return [new ActionRowBuilder().addComponents(
+    const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`share_rot_${rotId}`).setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary)
-    )];
+    );
+    // 排班時間過了但還沒結帳 → 結算按鈕一定要留著，否則收費團永遠結不了帳
+    if (rot.buyPrice > 0 && !rot.settled) {
+      row.addComponents(
+        new ButtonBuilder().setCustomId(`rot_closepay_${rotId}`).setLabel('💰 結算').setStyle(ButtonStyle.Danger)
+      );
+    }
+    return [row];
   }
 
   const rows = [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`rot_refresh_${rotId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`share_rot_${rotId}`).setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`rot_close_${rotId}`).setLabel('🚪 結束排班').setStyle(ButtonStyle.Danger)
+    // 有收費的團按下去要先跳表單問賣價，而跳表單前不能 defer，
+    // 所以用兩種 customId 讓處理器在「還沒讀資料庫」前就知道要走哪條路。
+    rot.buyPrice > 0
+      ? new ButtonBuilder().setCustomId(`rot_closepay_${rotId}`).setLabel('💰 結束並結算').setStyle(ButtonStyle.Danger)
+      : new ButtonBuilder().setCustomId(`rot_close_${rotId}`).setLabel('🚪 結束排班').setStyle(ButtonStyle.Danger)
   )];
 
   const empties = rotEmptyIndexes(rot, nowMs).slice(0, ROT_PICK_LIMIT);
@@ -4604,6 +4816,36 @@ function rotAllTakenIndexes(rot, nowMs = Date.now()) {
   const out = [];
   for (let i = from; i < rot.slotCount; i++) if (rotSlotOf(rot, i)) out.push(i);
   return out;
+}
+
+// 公開貼出結算報告，並把排班面板一起更新成已結束
+async function rotPostSettlement(interaction, rotId, rot, shareProfit) {
+  const { embed, mentions } = buildRotationSettlement(rot, Date.now(), shareProfit);
+  await refreshRotationMessage(rotId, rot, interaction);
+
+  try {
+    const ch = interaction.channel;
+    if (!ch?.isTextBased()) throw new Error('這裡不能發訊息');
+    await ch.send({
+      content: mentions.length ? mentions.map(u => `<@${u}>`).join(' ') : undefined,
+      embeds: [embed]
+    });
+  } catch (e) {
+    console.error('張貼接圖結算失敗:', e.message);
+    const msg = '⚠️ 結算算好了但貼不出去（機器人可能沒有發言權限）。下面是結算內容：';
+    if (interaction.deferred || interaction.replied) {
+      return await interaction.followUp({ content: msg, embeds: [embed], flags: MessageFlags.Ephemeral });
+    }
+    return await interaction.reply({ content: msg, embeds: [embed], flags: MessageFlags.Ephemeral });
+  }
+
+  const done = '✅ 已結算並公開貼到頻道。';
+  if (interaction.deferred || interaction.replied) {
+    return await interaction.editReply({ content: done, components: [], embeds: [] }).catch(async () => {
+      await interaction.followUp({ content: done, flags: MessageFlags.Ephemeral });
+    });
+  }
+  return await interaction.reply({ content: done, flags: MessageFlags.Ephemeral });
 }
 
 async function refreshRotationMessage(rotId, rot, interaction = null) {

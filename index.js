@@ -2369,7 +2369,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // 成員名冊（從名片面板點進來，公開發到頻道讓大家都看得到）
       if (customId === 'card_btn_roster') {
-        await interaction.deferReply();
+        // 預設私密。要給大家看就按面板上的 📤 分享面板。
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const embed = await generateJobEmbed('ALL_JOBS_LIST');
         const isAdmin = isSuperAdmin(interaction.user.id, interaction.memberPermissions);
         const components = [buildJobQueryMenu(isAdmin)];
@@ -2428,6 +2429,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ content: '👉 **請選擇要從名冊中刪除的分身角色：**', components: [row] });
       }
 
+      if (customId.startsWith('btn_confirm_delete_profile_')) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.editReply('❌ 僅超級管理員可使用！');
+        }
+        const targetUid = customId.replace('btn_confirm_delete_profile_', '');
+        const profile = await fetchUserDocSafe(targetUid);
+        const mainIgn = profile.mainIgn || '(未知)';
+        const subCount = (profile.subs || []).length;
+
+        await db.collection('member_profiles').doc(targetUid).delete();
+        invalidateProfile(targetUid);
+        const stillHere = await clearMemberRoles(interaction.guild, targetUid);
+
+        return await interaction.editReply(
+          `🗑️ 已刪除 <@${targetUid}> 的整筆名冊（本尊【**${mainIgn}**】＋ ${subCount} 隻分身）。\n`
+          + (stillHere ? '本人還在群內，身分組已清空並標為未認證。' : '本人已不在群內，只清掉資料庫紀錄。')
+        );
+      }
+
       if (customId.startsWith('btn_confirm_delete_char_')) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const parts = customId.split('_');
@@ -2465,10 +2486,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (customId === 'admin_roster_delete_btn') {
+        if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.reply({ content: '❌ 僅超級管理員可使用！', flags: MessageFlags.Ephemeral });
+        }
         const rowUser = new ActionRowBuilder().addComponents(
-          new UserSelectMenuBuilder().setCustomId('admin_select_user_to_delete_char').setPlaceholder('👥 選擇要為哪位成員刪除角色').setMinValues(1).setMaxValues(1)
+          new UserSelectMenuBuilder().setCustomId('admin_select_user_to_delete_char').setPlaceholder('👥 方式一：選擇群內成員').setMinValues(1).setMaxValues(1)
         );
-        return await interaction.reply({ content: '👉 **【管理員代刪角色】請先選擇目標成員：**', components: [rowUser], flags: MessageFlags.Ephemeral });
+        const rowBtn = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('admin_del_by_ign_btn').setLabel('🔎 方式二：用角色名稱搜尋').setStyle(ButtonStyle.Primary)
+        );
+        return await interaction.reply({
+          content: '👉 **【管理員代刪角色】兩種方式都可以：**\n'
+            + '‧ **方式一**：從群內成員挑人，再挑他的分身\n'
+            + '‧ **方式二**：直接打角色名稱搜尋 —— **已經退群的人也找得到**',
+          components: [rowUser, rowBtn],
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      if (customId === 'admin_del_by_ign_btn') {
+        if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.reply({ content: '❌ 僅超級管理員可使用！', flags: MessageFlags.Ephemeral });
+        }
+        const modal = new ModalBuilder().setCustomId('modal_del_search_ign').setTitle('用角色名稱搜尋');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('del_search_ign')
+              .setLabel('角色名稱（可只打一部分）')
+              .setPlaceholder('例如：沁霜　‧　打「霜」也找得到')
+              .setStyle(TextInputStyle.Short).setRequired(true)
+          )
+        );
+        return await interaction.showModal(modal);
       }
 
       // 【修復】放圖：我要圖 (預約)
@@ -3019,6 +3068,36 @@ client.on(Events.InteractionCreate, async (interaction) => {
       // 10. 名片更新等級與刪除
       if (customId === 'select_char_to_delete') {
         const val = interaction.values[0];
+
+        // 本尊沒了分身也留不住，所以刪本尊 = 刪掉整筆名冊，確認視窗要講清楚
+        if (val.startsWith('del_main_')) {
+          if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+            return interaction.reply({ content: '❌ 僅超級管理員可刪除本尊。', flags: MessageFlags.Ephemeral });
+          }
+          // Discord ID 是純數字，用正則切比 split('_') 穩 —— 角色名稱常含底線
+          const m = val.match(/^del_main_(\d+)_(.*)$/s);
+          if (!m) return interaction.reply({ content: '❌ 這個選項已失效，請重新搜尋。', flags: MessageFlags.Ephemeral });
+          const uid = m[1];
+          const mainIgn = m[2];
+          const prof = await fetchUserDocSafe(uid);
+          const subCount = (prof.subs || []).length;
+
+          const embedMain = new EmbedBuilder()
+            .setColor(0xED4245)
+            .setTitle(`⚠️ 這是本尊：【${mainIgn}】`)
+            .setDescription(
+              `持有人：<@${uid}>\n${PANEL_DIV}\n` +
+              `刪除本尊等於**刪掉這個人的整筆名冊**，連同 **${subCount}** 隻分身一起消失：\n` +
+              ((prof.subs || []).slice(0, 10).map(s => `‧ ${s.ign}（${s.job} Lv.${s.level}）`).join('\n') || '‧（沒有分身）') +
+              (subCount > 10 ? `\n‧ …還有 ${subCount - 10} 隻` : '') +
+              '\n\n**這個動作無法復原。** 本人若還在群內，身分組會一併清掉並標成未認證。'
+            );
+          const rowMain = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`btn_confirm_delete_profile_${uid}`).setLabel('🗑️ 確定刪除整筆名冊').setStyle(ButtonStyle.Danger)
+          );
+          return await interaction.reply({ embeds: [embedMain], components: [rowMain], flags: MessageFlags.Ephemeral });
+        }
+
         const parts = val.split('_');
         let targetUid = userChoiceMap.get(`target_del_user_${interaction.user.id}`) || interaction.user.id;
         let charIdx = 0;
@@ -3496,6 +3575,37 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // 12. 名片更新等級
       // 12. 一次更新所有角色等級
+      if (customId === 'modal_del_search_ign') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.editReply('❌ 僅超級管理員可使用！');
+        }
+        const kw = interaction.fields.getTextInputValue('del_search_ign');
+        const hits = await searchCharactersByIgn(kw);
+        if (!hits.length) {
+          return interaction.editReply(`🔍 名冊裡找不到含有「**${kw}**」的角色。`);
+        }
+
+        const shown = hits.slice(0, 25);
+        const options = shown.map(h => new StringSelectMenuOptionBuilder()
+          .setLabel(`${h.isMain ? '👑 本尊' : '⚔️ 分身'}：${h.ign} (${h.job} Lv.${h.lv})`.substring(0, 100))
+          .setDescription(`持有人：${h.nickname || h.uid}${h.isMain ? `　連同 ${h.subCount} 隻分身` : ''}`.substring(0, 100))
+          .setValue(h.isMain
+            ? `del_main_${h.uid}_${h.ign}`.substring(0, 100)
+            : `del_char_${h.uid}_${h.idx}_${h.ign}`.substring(0, 100)));
+
+        const row = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder().setCustomId('select_char_to_delete')
+            .setPlaceholder('⚠️ 選擇要刪除的角色').addOptions(options)
+        );
+        return await interaction.editReply({
+          content: `🔍 找到 **${hits.length}** 筆含有「**${kw}**」的角色`
+            + (hits.length > shown.length ? `（只列前 ${shown.length} 筆，請打更完整的名稱）` : '')
+            + '：',
+          components: [row]
+        });
+      }
+
       if (customId.startsWith('modal_raid_batch_')) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const targetUid = customId.replace('modal_raid_batch_', '');
@@ -4555,6 +4665,52 @@ function buildAddCharModal(targetUid) {
     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('add_char_level').setLabel('等級 (必填)').setValue('120').setStyle(TextInputStyle.Short).setRequired(true))
   );
   return modal;
+}
+
+// 用角色名稱反查名冊。直接掃 Firestore，所以**已經退群的人也找得到** ——
+// 原本只能從群內成員挑，退群的人留下的角色就永遠清不掉。
+async function searchCharactersByIgn(keyword) {
+  const kw = String(keyword || '').trim().toLowerCase();
+  if (!kw || !db) return [];
+  const snap = await db.collection('member_profiles').get();
+  const hits = [];
+
+  snap.forEach(doc => {
+    const d = doc.data();
+    if (d.mainIgn && d.mainIgn.toLowerCase().includes(kw)) {
+      hits.push({
+        uid: doc.id, ign: d.mainIgn, job: d.mainJob || '冒險家', lv: d.mainLevel || '1',
+        isMain: true, idx: -1, nickname: d.nickname, subCount: (d.subs || []).length
+      });
+    }
+    (d.subs || []).forEach((s, i) => {
+      if (s?.ign && s.ign.toLowerCase().includes(kw)) {
+        hits.push({
+          uid: doc.id, ign: s.ign, job: s.job || '冒險家', lv: s.level || '1',
+          isMain: false, idx: i, nickname: d.nickname
+        });
+      }
+    });
+  });
+
+  // 完全相符的排前面，免得打「霜」要在一堆模糊結果裡找「沁霜」
+  return hits.sort((a, b) => {
+    const ea = a.ign.toLowerCase() === kw ? 0 : 1;
+    const eb = b.ign.toLowerCase() === kw ? 0 : 1;
+    return ea - eb || a.ign.localeCompare(b.ign);
+  });
+}
+
+// 整筆名冊被刪掉時，把身分組收回來。回傳這個人是否還在群內。
+async function clearMemberRoles(guild, userId) {
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return false;
+  const strip = [...Object.values(ROLES.JOBS), ROLES.VERIFIED, ROLES.WARDEN_200, ROLES.RETIRED]
+    .filter(Boolean)
+    .filter(id => member.roles.cache.has(id));
+  if (strip.length) await member.roles.remove(strip).catch(() => {});
+  if (ROLES.UNVERIFIED) await member.roles.add(ROLES.UNVERIFIED).catch(() => {});
+  return true;
 }
 
 // 為指定成員建立「要刪除哪隻分身」的下拉選單（等級更新已改為批次表單）

@@ -64,6 +64,17 @@ const PARTY_BUFF_ICONS = {
 };
 function buffIcon(name) { return PARTY_BUFF_ICONS[name] || '✨'; }
 
+// 使用者自填的暱稱／角色名可能含反引號或 *_~ 之類的 Markdown 符號。
+// 只要有一個反引號，後面整段名冊的程式碼區塊就會錯位，排版全部跑掉。
+// codeSafe：要放進 `...` 裡的字串，反引號換成外觀相近的全形撇號
+function codeSafe(s) {
+  return String(s ?? '').replace(/`/g, '＇').replace(/[\r\n]+/g, ' ');
+}
+// mdSafe：直接露在文字裡的字串，把 Markdown 符號逐一跳脫
+function mdSafe(s) {
+  return String(s ?? '').replace(/([\\`*_~|<>])/g, '\\$1').replace(/[\r\n]+/g, ' ');
+}
+
 // 正服/阿泰爾對齊經驗表
 const CLASSIC_EXP_TABLE = [
   0, 15, 34, 57, 92, 135, 372, 560, 840, 1242,
@@ -615,7 +626,7 @@ function createPartyEmbed(partyData) {
 
   const embed = new EmbedBuilder()
     .setColor(partyData.isClosed ? 0x95A5A6 : (isFull ? 0xF1C40F : 0x00AE86))
-    .setTitle(`⚔️【突襲王 - 招募】${partyData.target}`)
+    .setTitle(`⚔️【${mdSafe(partyData.kind || '組隊')} - 招募】${mdSafe(partyData.target)}`)
     .addFields(
       { name: '隊長', value: `<@${partyData.creatorId}>`, inline: true },
       { name: '日期', value: `${partyData.date}`, inline: true },
@@ -746,7 +757,7 @@ async function generateJobEmbed(targetJob) {
   if (targetJob === 'WARDEN_LIST') {
     const wardens = members.filter(m => parseInt(m.mainLevel) >= 200);
     const desc = wardens.length
-      ? wardens.map((m, i) => `${i + 1}. 👑 \`${m.nickname || ''}[${m.mainLevel}_${m.mainJob}]\` - <@${m.userId}>${m.isRetired ? ' 🚪*已退休*' : ''}`).join('\n')
+      ? wardens.map((m, i) => `${i + 1}. 👑 \`${codeSafe(m.nickname || '')}[${codeSafe(m.mainLevel)}_${codeSafe(m.mainJob)}]\` - <@${m.userId}>${m.isRetired ? ' 🚪*已退休*' : ''}`).join('\n')
       : '目前尚未誕生 Lv 200 典獄長！';
     return new EmbedBuilder().setColor(0xF1C40F).setTitle('👑【尊榮的 Lv 200_典獄長】傳奇名冊').setDescription(desc);
   }
@@ -758,10 +769,10 @@ async function generateJobEmbed(targetJob) {
       const charList = [];
       members.forEach(m => {
         const retiredTag = m.isRetired ? ' 🚪*已退休*' : '';
-        const nickPrefix = m.nickname ? `${m.nickname}` : '';
-        if (m.mainJob === j) charList.push({ text: `\`${nickPrefix}[${m.mainLevel}_${m.mainJob}]\`（${m.mainIgn}）<@${m.userId}> **【本尊】**${retiredTag}`, lv: parseInt(m.mainLevel) || 0 });
+        const nickPrefix = codeSafe(m.nickname || '');
+        if (m.mainJob === j) charList.push({ text: `\`${nickPrefix}[${codeSafe(m.mainLevel)}_${codeSafe(m.mainJob)}]\`（${mdSafe(m.mainIgn)}）<@${m.userId}> **【本尊】**${retiredTag}`, lv: parseInt(m.mainLevel) || 0 });
         (m.subs || []).forEach(s => {
-          if (s?.job === j) charList.push({ text: `\`${nickPrefix}[${s.level}_${s.job}]\`（${s.ign}）<@${m.userId}> *(本尊: ${m.mainIgn})*${retiredTag}`, lv: parseInt(s.level) || 0 });
+          if (s?.job === j) charList.push({ text: `\`${nickPrefix}[${codeSafe(s.level)}_${codeSafe(s.job)}]\`（${mdSafe(s.ign)}）<@${m.userId}> *(本尊: ${mdSafe(m.mainIgn)})*${retiredTag}`, lv: parseInt(s.level) || 0 });
         });
       });
       if (charList.length && fCount < 24) {
@@ -776,10 +787,10 @@ async function generateJobEmbed(targetJob) {
   const list = [];
   members.forEach(m => {
     const retiredTag = m.isRetired ? ' 🚪*已退休*' : '';
-    const nickPrefix = m.nickname ? `${m.nickname}` : '';
-    if (m.mainJob === targetJob) list.push({ text: `\`${nickPrefix}[${m.mainLevel}_${m.mainJob}]\`（${m.mainIgn}）- <@${m.userId}> **【本尊】**${retiredTag}`, lv: parseInt(m.mainLevel) || 0 });
+    const nickPrefix = codeSafe(m.nickname || '');
+    if (m.mainJob === targetJob) list.push({ text: `\`${nickPrefix}[${codeSafe(m.mainLevel)}_${codeSafe(m.mainJob)}]\`（${mdSafe(m.mainIgn)}）- <@${m.userId}> **【本尊】**${retiredTag}`, lv: parseInt(m.mainLevel) || 0 });
     (m.subs || []).forEach(s => {
-      if (s?.job === targetJob) list.push({ text: `\`${nickPrefix}[${s.level}_${s.job}]\`（${s.ign}）- <@${m.userId}> [本尊: \`${m.mainIgn}\`]${retiredTag}`, lv: parseInt(s.level) || 0 });
+      if (s?.job === targetJob) list.push({ text: `\`${nickPrefix}[${codeSafe(s.level)}_${codeSafe(s.job)}]\`（${mdSafe(s.ign)}）- <@${m.userId}> [本尊: \`${codeSafe(m.mainIgn)}\`]${retiredTag}`, lv: parseInt(s.level) || 0 });
     });
   });
   list.sort((a, b) => b.lv - a.lv);
@@ -827,6 +838,7 @@ const commands = [
     .setName('揪團')
     .setDescription('不填參數＝看進行中的團；填了地點日期時間＝開新團')
     .addStringOption(o => o.setName('地點或名稱').setDescription('要開新團才填。例如：忘卻6、闇黑龍王、羅密歐').setRequired(false))
+    .addStringOption(o => o.setName('類型').setDescription('例如：突襲王、團練、付費吸趴。不填預設「組隊」').setRequired(false))
     .addStringOption(o => o.setName('日期').setDescription('開打日期 (格式：YYYY-MM-DD，例如 2026-09-15)').setRequired(false))
     .addStringOption(o => o.setName('時間').setDescription('開打時間 (24小時制，格式：HH:mm，例如 20:00)').setRequired(false))
     .addIntegerOption(o => o.setName('需要人數').setDescription('人數預設 6 人').setRequired(false).setMinValue(2).setMaxValue(30))
@@ -1305,6 +1317,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           id: pRef.id,
           creatorId: interaction.user.id,
           target,
+          kind: (interaction.options.getString('類型') || '').trim() || '組隊',
           date: rawDate,
           startTime: rawTime,
           startTimestamp,
@@ -1916,9 +1929,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const modal = new ModalBuilder().setCustomId(`modal_party_edit_${pId}`).setTitle('修改揪團資訊 (嚴格格式)');
         modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('e_kind').setLabel('類型（突襲王／團練／付費吸趴…）').setValue(d.kind || '組隊').setStyle(TextInputStyle.Short).setRequired(false)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('e_target').setLabel('目標地點/名稱').setValue(d.target || '').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('e_date').setLabel('日期 (嚴格格式：YYYY-MM-DD)').setValue(d.date || '2026-09-15').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('e_time').setLabel('時間 (嚴格格式：HH:mm，24小時制)').setValue(d.startTime || '20:00').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('e_when').setLabel('開打時間 (YYYY-MM-DD HH:mm)')
+            .setValue(`${d.date || '2026-09-15'} ${d.startTime || '20:00'}`).setStyle(TextInputStyle.Short).setRequired(true)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('e_max').setLabel('需要人數').setValue(`${d.maxCount || 6}`).setStyle(TextInputStyle.Short).setRequired(true)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('e_note').setLabel('備註說明').setValue(d.bindReq || '').setStyle(TextInputStyle.Paragraph).setRequired(false))
         );
@@ -2734,9 +2748,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       // 熱門地圖排隊：認領時段。沒開團練時一格只能一人，先搶先贏；開了團練則可併團。
-      if (customId.startsWith('rot_take_')) {
+      if (customId.startsWith('rot_take_') || customId.startsWith('rot_support_')) {
         await interaction.deferUpdate();
-        const rotId = customId.replace('rot_take_', '');
+        const asSupport = customId.startsWith('rot_support_');
+        const rotId = customId.replace(asSupport ? 'rot_support_' : 'rot_take_', '');
         const ref = db.collection('map_rotations').doc(rotId);
         const doc = await ref.get().catch(() => null);
         if (!doc?.exists) {
@@ -2773,7 +2788,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const prof = (await fetchProfile(interaction.user.id)).data;
         const ign = prof.mainIgn || interaction.member?.displayName || interaction.user.username;
-        const slots = rotSetSlot(rot.slots, idx, [...current, { userId: interaction.user.id, ign }]);
+        const me = { userId: interaction.user.id, ign };
+        if (asSupport) me.support = true;            // 外援不分攤費用
+        const slots = rotSetSlot(rot.slots, idx, [...current, me]);
         const colors = rotAssignColor(rot, interaction.user.id);
         await ref.update({ slots, colors });
 
@@ -2784,9 +2801,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           components: buildRotationComponents(rotId, merged)
         });
         const mates = current.map(u => `<@${u.userId}>`).join('、');
+        const payers = [...current.filter(u => !u.support), ...(asSupport ? [] : [me])].length;
         return await interaction.followUp({
           content: `✅ ${rotDayLabel(rotSlotMs(rot, idx))} ${rotSlotLabel(rot, idx)} 登記完成，到點機器人會 tag 你。`
-            + (mates ? `\n🤝 這格是**團練**，跟 ${mates} 一起，費用這一格由 ${current.length + 1} 人均分。` : '')
+            + (asSupport ? '\n🆘 你是**外援**，這段**不跟你收費**，謝謝幫忙顧圖！' : '')
+            + (mates ? `\n🤝 這格還有 ${mates}${payers > 1 ? `，費用由 ${payers} 位付費者均分` : ''}。` : '')
             + '\n要反悔的話用下面的「❌ 取消時段」選單。',
           flags: MessageFlags.Ephemeral
         });
@@ -3407,15 +3426,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
       // 9. 揪團修改提交 (同樣進行嚴格日期時間驗證)
       if (customId.startsWith('modal_party_edit_')) {
         const pId = customId.replace('modal_party_edit_', '');
-        const newDate = interaction.fields.getTextInputValue('e_date').trim();
-        const newTime = interaction.fields.getTextInputValue('e_time').trim();
+        // 日期與時間合併成一格填寫，用空白切開
+        const whenRaw = interaction.fields.getTextInputValue('e_when').trim();
+        const [newDate, newTime] = whenRaw.split(/[\s　]+/);
 
         const startTimestamp = parseStrictPartyTimestamp(newDate, newTime);
         if (!startTimestamp) {
           return await interaction.reply({
-            content: `❌ **日期或時間格式填寫錯誤！**\n` +
-                     `• **日期** 請嚴格依照 \`YYYY-MM-DD\` 格式（例如：\`2026-09-15\`）\n` +
-                     `• **時間** 請嚴格依照 24 小時制 \`HH:mm\` 格式（例如：\`20:00\`）`,
+            content: `❌ **開打時間格式錯誤！**\n`
+              + '請照這個格式填，中間用一個空白隔開：`2026-09-15 20:00`\n'
+              + '• 日期 `YYYY-MM-DD`　• 時間 24 小時制 `HH:mm`',
             flags: MessageFlags.Ephemeral
           });
         }
@@ -3425,6 +3445,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!doc.exists) return interaction.editReply('❌ 揪團不存在。');
         const pData = doc.data();
 
+        pData.kind = (interaction.fields.getTextInputValue('e_kind') || '').trim() || '組隊';
         pData.target = interaction.fields.getTextInputValue('e_target').trim();
         pData.date = newDate;
         pData.startTime = newTime;
@@ -4480,7 +4501,7 @@ const ROT_SPAN_HOURS = 48;          // 預設涵蓋 48 小時，開表時可自�
 const ROT_MIN_SPAN_H = 1, ROT_MAX_SPAN_H = 48;    // 1 ~ 48 小時
 const ROT_SPLIT_EVEN = 'even', ROT_SPLIT_TIME = 'time';
 const ROT_MAX_PER_SLOT = 5;         // 團練時同一格最多幾個人
-const ROT_SLOT_MIN = 60;            // 一格固定 60 分鐘（不開放自訂）
+const ROT_SLOT_MIN = 30;            // 一格固定 30 分鐘（不開放自訂）
 const ROT_DESC_BUDGET = 3200;       // 留給表格的字數，其餘讓給標題、狀態列與圖例
 const ROT_MAX_DAYS = 3;             // 48 小時最多橫跨 3 個日曆天
 const ROT_PICK_LIMIT = 25;          // Discord 下拉選單硬上限
@@ -4625,7 +4646,12 @@ function rotPickableIndexes(rot, userId, nowMs = Date.now()) {
 function dispWidth(str) {
   let w = 0;
   for (const ch of String(str)) {
-    w += /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹯＀-｠￠-￦　-〿]/.test(ch) ? 2 : 1;
+    // 中日韓文字、全形符號與 emoji 在等寬字體都佔兩格
+    const cp = ch.codePointAt(0);
+    const wide = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹯＀-｠￠-￦　-〿]/.test(ch)
+      || (cp >= 0x2600 && cp <= 0x27BF)
+      || (cp >= 0x1F000 && cp <= 0x1FAFF);
+    w += wide ? 2 : 1;
   }
   return w;
 }
@@ -4673,7 +4699,12 @@ function rotRenderGrid(rot, nowMs = Date.now()) {
       if (idx < 0 || idx >= rot.slotCount) return { kind: 'out' };
       const users = rotSlotUsers(rot, idx);
       if (!users.length) return { kind: 'free', idx, now: idx === curIdx };
-      return { kind: 'busy', idx, s: users[0], n: users.length, past: idx < curIdx, now: idx === curIdx };
+      const payers = users.filter(u => !u.support);
+      return {
+        kind: 'busy', idx, s: payers[0] || users[0], n: users.length,
+        allSupport: payers.length === 0,
+        past: idx < curIdx, now: idx === curIdx
+      };
     });
     rows.push({ r, time: rotTimeLabel(tpeMidnight(rot.startMs) + offset + r * slotMs), cells });
   }
@@ -4689,8 +4720,11 @@ function rotRenderGrid(rot, nowMs = Date.now()) {
       else if (c.kind === 'free') { col = 30; text = padCell('░░', CELL_W); }
       else {
         col = c.past ? 30 : (colors.get(c.s.userId) || 37);
-        // 團練的格子標 +N，表示這一格還有其他人
-        text = padCell(c.n > 1 ? `██+${c.n}` : '██' + rotTag(c.s.ign), CELL_W);
+        // 團練的格子標 +N；整格都是外援就標 🆘，一眼看出這段不用收錢
+        text = padCell(
+          c.allSupport ? '██🆘' : (c.n > 1 ? `██+${c.n}` : '██' + rotTag(c.s.ign)),
+          CELL_W
+        );
       }
       if (col !== cur) { line += `\u001b[${col}m`; cur = col; }
       line += text;
@@ -4725,12 +4759,13 @@ function rotRenderGrid(rot, nowMs = Date.now()) {
   // 圖例：顏色只有六種，光看色塊認不出人，一定要有對照表
   const seen = [];
   for (let i = 0; i < rot.slotCount; i++) {
-    const s = rotSlotOf(rot, i);
-    if (s && !seen.some(x => x.userId === s.userId)) seen.push(s);
+    rotSlotUsers(rot, i).forEach(u => {
+      if (!seen.some(x => x.userId === u.userId)) seen.push(u);
+    });
   }
   const legend = seen.length
     ? '\n```ansi\n' + seen.map(s =>
-        `\u001b[${colors.get(s.userId) || 37}m██ ${rotTag(s.ign)}\u001b[0m = ${s.ign}`).join('\n') + '\n```'
+        `\u001b[${colors.get(s.userId) || 37}m██ ${rotTag(s.ign)}\u001b[0m = ${s.ign}${s.support ? ' 🆘外援' : ''}`).join('\n') + '\n```'
     : '';
 
   // 先試「全部畫出來」，裝不下才依序退讓。ROT_DESC_BUDGET 留給標題、狀態列與圖例。
@@ -4766,9 +4801,12 @@ function rotParticipants(rot, nowMs = Date.now()) {
   const byUser = new Map();
   for (let i = 0; i < rot.slotCount; i++) {
     if (rotSlotMs(rot, i) > nowMs) break;            // 格子照時間遞增
-    const users = rotSlotUsers(rot, i);
-    if (!users.length) continue;
-    const share = 1 / users.length;                  // 團練：這一格由幾個人分
+    const all = rotSlotUsers(rot, i);
+    if (!all.length) continue;
+    // 外援只是來幫忙顧圖，不分攤費用 —— 這一格的錢由付費的人平分
+    const users = all.filter(u => !u.support);
+    if (!users.length) continue;                     // 整格都是外援 → 這格不計費
+    const share = 1 / users.length;
     users.forEach(u => {
       const hit = byUser.get(u.userId) || { userId: u.userId, ign: u.ign, slots: 0, raw: 0, shared: 0 };
       hit.slots += share;                            // 算錢用的權重
@@ -4782,6 +4820,21 @@ function rotParticipants(rot, nowMs = Date.now()) {
 }
 
 function rotSplitLabel(mode) { return mode === ROT_SPLIT_TIME ? '按時間攤' : '均攤'; }
+
+// 外援：有來顧圖但不分攤費用的人
+function rotSupporters(rot, nowMs = Date.now()) {
+  const byUser = new Map();
+  for (let i = 0; i < rot.slotCount; i++) {
+    if (rotSlotMs(rot, i) > nowMs) break;
+    rotSlotUsers(rot, i).forEach(u => {
+      if (!u.support) return;
+      const hit = byUser.get(u.userId) || { userId: u.userId, ign: u.ign, slots: 0 };
+      hit.slots++; hit.ign = u.ign;
+      byUser.set(u.userId, hit);
+    });
+  }
+  return [...byUser.values()].sort((a, b) => b.slots - a.slots);
+}
 
 // 產生接圖結算報告。shareProfit 只有在「賣價 > 買價」時才有意義。
 function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
@@ -4822,7 +4875,8 @@ function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
 
   const rowsWithAmt = rotSplitAmount(net, parts, rot.splitMode);
   const totalSlots = parts.reduce((a, p) => a + p.slots, 0) || 1;
-  const nameW = Math.min(14, Math.max(...rowsWithAmt.map(r => dispWidth(r.ign))));
+  // 下限 6 是「參與者」三個字的寬度，不留這個下限表頭會跟時段欄黏在一起
+  const nameW = Math.min(14, Math.max(6, ...rowsWithAmt.map(r => dispWidth(r.ign))));
   const fmtSlots = (x) => (Math.round(x * 100) / 100).toString();
   const byTime = rot.splitMode === ROT_SPLIT_TIME;
 
@@ -4865,10 +4919,15 @@ function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
     ? `<@${rot.creatorId}> 請把上面的金額**發給**每一位（自己那份留著），共需發出 **${formatMeso(collect)}**。`
     : `請把上面的金額**匯給** <@${rot.creatorId}>。他自己那份不用匯，實際可收回 **${formatMeso(collect)}**。`;
 
+  const sup = rotSupporters(rot, nowMs);
+  const supLine = sup.length
+    ? `\n🆘 **外援（不分攤）**：${sup.map(x => `<@${x.userId}>（${x.slots} 格）`).join('、')} —— 謝謝幫忙顧圖！`
+    : '';
+
   let desc = `${priceLine}\n分攤方式：**${rotSplitLabel(rot.splitMode)}**　‧　`
     + `${byTime ? `共 ${fmtSlots(totalSlots)} 格` : ''}${byTime ? ' ‧ ' : ''}${parts.length} 人\n`
     + `${earlyNote}${PANEL_DIV}\n${table}\n`
-    + `📐 **怎麼算出來的**\n${steps.map(x => `‧ ${x}`).join('\n')}\n${detail.join('\n')}\n\n${action}`;
+    + `📐 **怎麼算出來的**\n${steps.map(x => `‧ ${x}`).join('\n')}\n${detail.join('\n')}${supLine}\n\n${action}`;
   if (desc.length > 4000) desc = desc.slice(0, 3990) + '\n…（明細太長已截斷）';
 
   const embed = new EmbedBuilder()
@@ -4910,6 +4969,7 @@ function buildRotationEmbed(rot, nowMs = Date.now()) {
     + `　（共 ${Math.round((endAll - rot.startMs) / 3600000 * 10) / 10} 小時）\n`;
 
   const shareLine = rot.allowShare ? '🤝 **團練模式**：同一時段可以多人一起登記，該格費用由這些人均分\n' : '';
+  const supportHint = rot.buyPrice > 0 ? '🆘 找外援幫忙顧圖的話，請他用「我來當外援」登記，不會跟他收錢\n' : '';
   const pending = [];
   if (!(rot.channelNum > 0)) pending.push('頻道');
   if (!(rot.buyPrice > 0)) pending.push('買圖價格');
@@ -4925,7 +4985,7 @@ function buildRotationEmbed(rot, nowMs = Date.now()) {
     .setColor(rot.isClosed ? 0x95A5A6 : (cur ? 0x57F287 : 0xF1C40F))
     .setTitle(`🗓️【輪流接圖】${rot.mapName}　‧　${rotChanLabel(rot)}`)
     .setDescription(
-      `📌 ${rot.note || '無特殊備註'}\n${range}${money}${shareLine}${todo}` +
+      `📌 ${rot.note || '無特殊備註'}\n${range}${money}${shareLine}${supportHint}${todo}` +
       `${PANEL_DIV}\n${status}\n\n${table}${legend}`
     )
     .setFooter({ text: `一格 ${rotSlotLen(rot)} 分鐘　‧　已排 ${taken} 格　‧　還空 ${emptyCount} 格　‧　· 表示不在排班範圍` });
@@ -4972,6 +5032,17 @@ function buildRotationComponents(rotId, rot, nowMs = Date.now()) {
           .setDescription((p.n
             ? `${rotDayLabel(rotSlotMs(rot, p.idx))}　已有：${rotSlotUsers(rot, p.idx).map(u => u.ign).join('、')}`
             : rotDayLabel(rotSlotMs(rot, p.idx))).slice(0, 100))
+          .setValue(String(p.idx))))
+    ));
+  }
+
+  if (pickable.length) {
+    rows.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId(`rot_support_${rotId}`)
+        .setPlaceholder('🆘 我來當外援 — 幫忙顧圖，不分攤費用')
+        .addOptions(pickable.map(p => new StringSelectMenuOptionBuilder()
+          .setLabel((p.n ? `${rotSlotLabel(rot, p.idx)}　🤝 併(${p.n}人)` : rotSlotLabel(rot, p.idx)).slice(0, 100))
+          .setDescription(`${rotDayLabel(rotSlotMs(rot, p.idx))}　登記為外援，這段不跟你收錢`.slice(0, 100))
           .setValue(String(p.idx))))
     ));
   }

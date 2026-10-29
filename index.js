@@ -2264,9 +2264,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const rotId = customId.replace('rot_edit_', '');
         const rot = await fetchRotFast(rotId);
         if (!rot) return interaction.reply({ content: '❌ 讀不到這張排班表，請按 🔄 即時更新後再試。', flags: MessageFlags.Ephemeral });
-        if (rot.creatorId !== interaction.user.id && rotPayerId(rot) !== interaction.user.id
+        if (rot.creatorId !== interaction.user.id && !rotIsMoneyRole(rot, interaction.user.id)
           && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
-          return interaction.reply({ content: '❌ 只有開表的人、墊付人或管理員可以修改內容。頻道的話你可以按 📺 改頻道。', flags: MessageFlags.Ephemeral });
+          return interaction.reply({ content: '❌ 只有開表的人、墊付人、收款人或管理員可以修改內容。頻道的話你可以按 📺 改頻道。', flags: MessageFlags.Ephemeral });
         }
 
         const modal = new ModalBuilder().setCustomId(`modal_rot_edit_${rotId}`).setTitle('修改排班內容');
@@ -2320,9 +2320,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const doc = await ref.get().catch(() => null);
         if (!doc?.exists) return await interaction.followUp({ content: '❌ 這張排班表已經不存在了。', flags: MessageFlags.Ephemeral });
         const rot = doc.data();
-        if (rot.creatorId !== interaction.user.id && rotPayerId(rot) !== interaction.user.id
+        if (rot.creatorId !== interaction.user.id && !rotIsMoneyRole(rot, interaction.user.id)
           && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
-          return await interaction.followUp({ content: '❌ 只有開表的人、墊付人或管理員可以切換團練。', flags: MessageFlags.Ephemeral });
+          return await interaction.followUp({ content: '❌ 只有開表的人、墊付人、收款人或管理員可以切換團練。', flags: MessageFlags.Ephemeral });
         }
         const allowShare = !rot.allowShare;
         await ref.update({ allowShare });
@@ -2368,25 +2368,33 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const rot = await fetchRotFast(rotId);
         if (!rot) return await interaction.editReply('❌ 讀不到這張排班表，請按 🔄 即時更新後再試。');
         if (!rotCanProxy(rot, interaction)) {
-          return await interaction.editReply('❌ 只有開表的人、墊付人、管理員，或是這張表裡有排班的人才能幫別人登記。');
+          return await interaction.editReply('❌ 只有開表的人、墊付人、收款人、管理員，或是這張表裡有排班的人才能幫別人登記。');
         }
         const rows = [new ActionRowBuilder().addComponents(
           new UserSelectMenuBuilder().setCustomId(`rot_proxy_user_${rotId}`)
             .setPlaceholder('👥 幫誰登記時段（可補登過去的）').setMinValues(1).setMaxValues(1)
         )];
-        // 換墊付人只給開表者、現任墊付人與管理員
+        // 換墊付人／收款人只給開表者、現任墊付人、現任收款人與管理員
         const canPay = interaction.user.id === rot.creatorId
-          || interaction.user.id === rotPayerId(rot)
+          || rotIsMoneyRole(rot, interaction.user.id)
           || isSuperAdmin(interaction.user.id, interaction.memberPermissions);
         if (canPay) {
           rows.push(new ActionRowBuilder().addComponents(
             new UserSelectMenuBuilder().setCustomId(`rot_payer_user_${rotId}`)
-              .setPlaceholder('💰 換墊付／收款的人').setMinValues(1).setMaxValues(1)
+              .setPlaceholder('💰 換墊付人（出錢買圖、結算收錢的人）').setMinValues(1).setMaxValues(1)
+          ));
+          rows.push(new ActionRowBuilder().addComponents(
+            new UserSelectMenuBuilder().setCustomId(`rot_collector_user_${rotId}`)
+              .setPlaceholder('🧾 換收款人（負責催收對帳的人）').setMinValues(1).setMaxValues(1)
           ));
         }
         return await interaction.editReply({
           content: '👥 **代登記**：選人之後再選時段，會記錄是你代按的並顯示在面板上。'
-            + (canPay ? `\n💰 **墊付／收款人**目前是 <@${rotPayerId(rot)}>，要換的話用下面那個選單。` : ''),
+            + (canPay
+              ? `\n\n💰 **墊付人**目前是 <@${rotPayerId(rot)}> —— 他出錢買圖，結算時大家把錢**匯給他**。`
+                + `\n🧾 **收款人**目前是 <@${rotCollectorId(rot)}> —— 負責催收、對帳，**不經手錢**。`
+                + (rotHasSeparateCollector(rot) ? '' : '\n*（目前是同一個人兼著。選一個收款人就會分開。）*')
+              : ''),
           components: rows
         });
       }
@@ -2420,9 +2428,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const doc = await ref.get().catch(() => null);
         if (!doc?.exists) return await interaction.followUp({ content: '❌ 這張排班表已經不存在了。', flags: MessageFlags.Ephemeral });
         const rot = doc.data();
-        if (rot.creatorId !== interaction.user.id && rotPayerId(rot) !== interaction.user.id
+        if (rot.creatorId !== interaction.user.id && !rotIsMoneyRole(rot, interaction.user.id)
           && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
-          return await interaction.followUp({ content: '❌ 只有開表的人或墊付人可以決定。', flags: MessageFlags.Ephemeral });
+          return await interaction.followUp({ content: '❌ 只有開表的人、墊付人或收款人可以決定。', flags: MessageFlags.Ephemeral });
         }
         await ref.update({ isClosed: true, settled: true, shareProfit: share });
         return await rotPostSettlement(interaction, rotId, { ...rot, isClosed: true, settled: true }, share);
@@ -2843,7 +2851,40 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // 換墊付／收款人
+      // 換收款人（催收對帳，不經手錢）
+      if (customId.startsWith('rot_collector_user_')) {
+        await interaction.deferUpdate();
+        const rotId = customId.replace('rot_collector_user_', '');
+        const ref = db.collection('map_rotations').doc(rotId);
+        const doc = await ref.get().catch(() => null);
+        if (!doc?.exists) return await interaction.editReply({ content: '❌ 這張排班表已經不存在了。', components: [] });
+        const rot = doc.data();
+        if (interaction.user.id !== rot.creatorId && !rotIsMoneyRole(rot, interaction.user.id)
+          && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return await interaction.editReply({ content: '❌ 只有開表的人、墊付人、現任收款人或管理員可以換。', components: [] });
+        }
+        const collectorId = interaction.values[0];
+        const before = rotCollectorId(rot);
+        if (collectorId === before) return await interaction.editReply({ content: '💡 本來就是這個人，沒有變動。', components: [] });
+
+        await ref.update({ collectorId });
+        const merged = { ...rot, collectorId };
+        cacheRot(rotId, merged);
+        await refreshRotationMessage(rotId, merged, interaction);
+        try {
+          const ch = interaction.channel;
+          if (ch?.isTextBased()) {
+            await ch.send(`🧾 **【收款人變更】${rot.mapName}**　<@${before}> ➔ <@${collectorId}>\n`
+              + `<@${collectorId}> 負責催收與對帳；錢還是直接匯給墊付人 <@${rotPayerId(merged)}>。`);
+          }
+        } catch { /* 沒發言權限就算了 */ }
+        return await interaction.editReply({
+          content: `✅ 收款人已改成 <@${collectorId}>（催收對帳，不經手錢），並公告到頻道。`,
+          components: []
+        });
+      }
+
+      // 換墊付人（出錢買圖、結算時收錢的人）
       if (customId.startsWith('rot_payer_user_')) {
         await interaction.deferUpdate();
         const rotId = customId.replace('rot_payer_user_', '');
@@ -2851,9 +2892,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const doc = await ref.get().catch(() => null);
         if (!doc?.exists) return await interaction.editReply({ content: '❌ 這張排班表已經不存在了。', components: [] });
         const rot = doc.data();
-        if (interaction.user.id !== rot.creatorId && interaction.user.id !== rotPayerId(rot)
+        if (interaction.user.id !== rot.creatorId && !rotIsMoneyRole(rot, interaction.user.id)
           && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
-          return await interaction.editReply({ content: '❌ 只有開表的人、現任墊付人或管理員可以換。', components: [] });
+          return await interaction.editReply({ content: '❌ 只有開表的人、現任墊付人、收款人或管理員可以換。', components: [] });
         }
         const payerId = interaction.values[0];
         const before = rotPayerId(rot);
@@ -2866,10 +2907,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         try {
           const ch = interaction.channel;
           if (ch?.isTextBased()) {
-            await ch.send(`💰 **【墊付人變更】${rot.mapName}**　<@${before}> ➔ <@${payerId}>\n結算時大家會把錢匯給 <@${payerId}>。`);
+            await ch.send(`💰 **【墊付人變更】${rot.mapName}**　<@${before}> ➔ <@${payerId}>\n`
+              + `<@${payerId}> 出錢買圖，結算時大家把錢**匯給他**。`);
           }
         } catch { /* 沒發言權限就算了 */ }
-        return await interaction.editReply({ content: `✅ 墊付／收款人已改成 <@${payerId}>，並公告到頻道。`, components: [] });
+        return await interaction.editReply({ content: `✅ 墊付人已改成 <@${payerId}>（結算時大家匯給他），並公告到頻道。`, components: [] });
       }
 
       // 代登記第三步：記下選了哪些時段，再問這批算成員還是外援
@@ -3862,7 +3904,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           note: '無特殊備註',
           slotMinutes, startMs, slotCount, spanHours,
           buyPrice, splitMode: ROT_SPLIT_EVEN, allowShare: false, sellPrice: 0, settled: false,
-          payerId: interaction.user.id,   // 預設開表者墊錢，可用 ✏️ 修改內容 換人
+          payerId: interaction.user.id,      // 出錢買圖、結算時收錢的人
+          collectorId: interaction.user.id,   // 催收對帳的人，可在「👥 代登記／墊付收款」換掉
           gapAsked: [],
           slots: {}, colors: {}, isClosed: false, notifiedIdx: -1, preNotified: [],
           createdAt: admin.firestore.FieldValue.serverTimestamp()
@@ -3984,9 +4027,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const doc = await ref.get().catch(() => null);
         if (!doc?.exists) return interaction.editReply('❌ 這張排班表已經不存在了。');
         const rot = doc.data();
-        if (rot.creatorId !== interaction.user.id && rotPayerId(rot) !== interaction.user.id
+        if (rot.creatorId !== interaction.user.id && !rotIsMoneyRole(rot, interaction.user.id)
           && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
-          return interaction.editReply('❌ 只有開表的人、墊付人或管理員可以修改內容。');
+          return interaction.editReply('❌ 只有開表的人、墊付人、收款人或管理員可以修改內容。');
         }
         if (rot.settled) return interaction.editReply('💡 這張表已經結算完畢，不能再改了。');
 
@@ -4024,7 +4067,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const rot = doc.data();
 
         if (!rotCanSettle(rot, interaction)) {
-          return interaction.editReply('❌ 只有開表的人、墊付人、管理員，或是收尾那一段的人可以結算。');
+          return interaction.editReply('❌ 只有開表的人、墊付人、收款人、管理員，或是收尾那一段的人可以結算。');
         }
         if (rot.settled) return interaction.editReply('💡 這張表已經結算過了。');
 
@@ -5347,7 +5390,7 @@ function rotSplitIdUid(customId, prefix) {
   const cut = rest.lastIndexOf('_');
   return { rotId: rest.slice(0, cut), targetUid: rest.slice(cut + 1) };
 }
-const ROT_PEND_EXPIRED = '⌛ 這份選擇已經過期（超過 10 分鐘），請重新按「👥 代登記／墊付人」選一次。';
+const ROT_PEND_EXPIRED = '⌛ 這份選擇已經過期（超過 10 分鐘），請重新按「👥 代登記／墊付收款」選一次。';
 
 // 代登記真正寫入的地方（成員與外援兩條路共用）。回傳一句要回給操作者的話。
 async function rotProxyWrite(interaction, rotId, targetUid, idxs, { support = false, ign: forcedIgn } = {}) {
@@ -5417,6 +5460,14 @@ const ROT_CLAIM_ERRORS = {
 // 收錢的人預設是開表者，但可以換（有人代開表、或換人墊錢）
 function rotPayerId(rot) { return rot?.payerId || rot?.creatorId; }
 
+// 收款（對帳催收）的人。沒單獨設定時就是墊付人自己兼。
+// 錢一律直接匯給墊付人，收款人只負責催收、對帳，不經手錢。
+function rotCollectorId(rot) { return rot?.collectorId || rotPayerId(rot); }
+function rotHasSeparateCollector(rot) { return rotCollectorId(rot) !== rotPayerId(rot); }
+
+// 出錢的跟收帳的都算「管錢的人」，權限一樣
+function rotIsMoneyRole(rot, uid) { return uid === rotPayerId(rot) || uid === rotCollectorId(rot); }
+
 // 「當下最後一個打的人」—— 已開始的時段裡，最後一個有人的格子的佔用者
 function rotLastPlayers(rot, nowMs = Date.now()) {
   const upTo = Math.min(rot.slotCount, rotCurrentIndex(rot, nowMs) + 1);
@@ -5427,19 +5478,19 @@ function rotLastPlayers(rot, nowMs = Date.now()) {
   return [];
 }
 
-// 誰可以結算：開表者、墊付人、管理員，再加上收尾那個人
+// 誰可以結算：開表者、墊付人、收款人、管理員，再加上收尾那個人
 function rotCanSettle(rot, interaction, nowMs = Date.now()) {
   const uid = interaction.user.id;
   return uid === rot.creatorId
-    || uid === rotPayerId(rot)
+    || rotIsMoneyRole(rot, uid)
     || isSuperAdmin(uid, interaction.memberPermissions)
     || rotLastPlayers(rot, nowMs).includes(uid);
 }
 
-// 誰可以幫別人代按：開表者、墊付人、管理員，以及同一張表裡有排班的人
+// 誰可以幫別人代按：開表者、墊付人、收款人、管理員，以及同一張表裡有排班的人
 function rotCanProxy(rot, interaction) {
   const uid = interaction.user.id;
-  if (uid === rot.creatorId || uid === rotPayerId(rot)) return true;
+  if (uid === rot.creatorId || rotIsMoneyRole(rot, uid)) return true;
   if (isSuperAdmin(uid, interaction.memberPermissions)) return true;
   return Object.keys(rot.slots || {}).some(k => rotHasUser(rot, Number(k), uid));
 }
@@ -5490,6 +5541,7 @@ function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
         .setDescription(
           `${priceLine}\n${earlyNote}${PANEL_DIV}\n`
           + `這趟是賺的，<@${rotPayerId(rot)}> 決定不分攤 —— **大家都不用付錢**。\n`
+          + (rotHasSeparateCollector(rot) ? `🧾 對帳：<@${rotCollectorId(rot)}>\n` : '')
           + `參與者：${parts.map(p => `<@${p.userId}>`).join('、')}`
         ),
       mentions: []
@@ -5509,7 +5561,8 @@ function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
     const pct = (r.slots / totalSlots * 100).toFixed(1);
     body += ` ${padCell(r.ign, nameW + 2)}${padCell(`${fmtSlots(r.slots)} 格 ${pct}%`, 13)}`
       + `\u001b[${profit ? 32 : 33}m${formatMeso(Math.abs(r.amount))}\u001b[0m`
-      + (r.userId === rotPayerId(rot) ? ' \u001b[30m(墊付人)\u001b[0m' : '') + '\n';
+      + (r.userId === rotPayerId(rot) ? ' \u001b[30m(墊付人)\u001b[0m' : '')
+      + (rotHasSeparateCollector(rot) && r.userId === rotCollectorId(rot) ? ' \u001b[30m(收款人)\u001b[0m' : '') + '\n';
   });
 
   // ── 明細：把每一步算式攤開，才不會有人覺得數字是憑空生出來的 ──
@@ -5536,12 +5589,18 @@ function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
   if (exact !== abs) detail.push(`‧ 進位零頭 ${Math.abs(abs - exact)} 已併入最後一位`);
 
   const payerId = rotPayerId(rot);
+  const collectorId = rotCollectorId(rot);
+  // 墊付人已經先把錢付出去了，所以他自己那份不用再匯一次
   const ownerRow = rowsWithAmt.find(r => r.userId === payerId);
   const collect = abs - (ownerRow ? Math.abs(ownerRow.amount) : 0);
   const table = '```ansi\n' + body + '```';
-  const action = profit
+  // 錢一律直接匯給墊付人（他出的錢他收回），收款人只負責催收、對帳
+  const action = (profit
     ? `<@${payerId}> 請把上面的金額**發給**每一位（自己那份留著），共需發出 **${formatMeso(collect)}**。`
-    : `請把上面的金額**匯給** <@${payerId}>。他自己那份不用匯，實際可收回 **${formatMeso(collect)}**。`;
+    : `請把上面的金額**匯給** <@${payerId}>。他自己那份不用匯，實際可收回 **${formatMeso(collect)}**。`)
+    + (rotHasSeparateCollector(rot)
+      ? `\n🧾 對帳、催收由 <@${collectorId}> 負責（錢不用經過他，直接給 <@${payerId}> 就好）。`
+      : '');
 
   const sup = rotSupporters(rot, nowMs);
   const supLine = sup.length
@@ -5602,7 +5661,10 @@ function buildRotationEmbed(rot, nowMs = Date.now()) {
     : '';
 
   const money = rot.buyPrice > 0
-    ? `💰 買圖 ${formatMeso(rot.buyPrice)}　‧　${rotSplitLabel(rot.splitMode)}　‧　墊付／收款：<@${rotPayerId(rot)}>\n`
+    ? `💰 買圖 ${formatMeso(rot.buyPrice)}　‧　${rotSplitLabel(rot.splitMode)}　‧　`
+      + (rotHasSeparateCollector(rot)
+        ? `墊付：<@${rotPayerId(rot)}>　‧　收款：<@${rotCollectorId(rot)}>\n`
+        : `墊付＋收款：<@${rotPayerId(rot)}>\n`)
     : '';
 
   const embed = new EmbedBuilder()
@@ -5648,7 +5710,7 @@ function buildRotationComponents(rotId, rot, nowMs = Date.now()) {
       new ButtonBuilder().setCustomId(`rot_share_toggle_${rotId}`)
         .setLabel(rot.allowShare ? '🤝 團練：開' : '🤝 團練：關')
         .setStyle(rot.allowShare ? ButtonStyle.Success : ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`rot_proxy_${rotId}`).setLabel('👥 代登記／墊付人').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`rot_proxy_${rotId}`).setLabel('👥 代登記／墊付收款').setStyle(ButtonStyle.Primary),
       // 有收費的團按下去要先跳表單問賣價，而跳表單前不能 defer，
       // 所以用兩種 customId 讓處理器在「還沒讀資料庫」前就知道要走哪條路。
       rot.buyPrice > 0

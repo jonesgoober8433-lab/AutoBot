@@ -2335,6 +2335,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
+      // ── 代登記第四步（成員）：直接整批寫入 ──
+      if (customId.startsWith('rot_pxgo_')) {
+        await interaction.deferUpdate();
+        const { rotId, targetUid } = rotSplitIdUid(customId, 'rot_pxgo_');
+        const idxs = rotPendTake(rotId, interaction.user.id, targetUid);
+        if (!idxs) return await interaction.editReply({ content: ROT_PEND_EXPIRED, components: [] });
+        const msg = await rotProxyWrite(interaction, rotId, targetUid, idxs, { support: false });
+        return await interaction.editReply({ content: msg.slice(0, 1900), components: [] });
+      }
+
+      // ── 代登記第四步（外援）：先問角色名。跳表單前不能 defer，所以這裡只能 peek ──
+      if (customId.startsWith('rot_pxsos_')) {
+        const { rotId, targetUid } = rotSplitIdUid(customId, 'rot_pxsos_');
+        const idxs = rotPendPeek(rotId, interaction.user.id, targetUid);
+        if (!idxs) return interaction.reply({ content: ROT_PEND_EXPIRED, flags: MessageFlags.Ephemeral });
+        const modal = new ModalBuilder().setCustomId(`modal_rot_pxsos_${rotId}_${targetUid}`).setTitle('外援顧圖登記');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('sos_ign').setLabel(`外援用的角色名（共 ${idxs.length} 段）`.slice(0, 45))
+              .setPlaceholder('打哪隻就填哪隻，這些時段不會收費')
+              .setStyle(TextInputStyle.Short).setRequired(true)
+          )
+        );
+        return await interaction.showModal(modal);
+      }
+
       // ── 👥 幫別人登記：先選人，再選時段 ──
       if (customId.startsWith('rot_proxy_')) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2846,54 +2872,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ content: `✅ 墊付／收款人已改成 <@${payerId}>，並公告到頻道。`, components: [] });
       }
 
-      // 代登記第三步：寫入，並記下是誰代按的、什麼時候按的
+      // 代登記第三步：記下選了哪些時段，再問這批算成員還是外援
       if (customId.startsWith('rot_proxyslot_')) {
         await interaction.deferUpdate();
-        const rest = customId.replace('rot_proxyslot_', '');
-        const cut = rest.lastIndexOf('_');
-        const rotId = rest.slice(0, cut);
-        const targetUid = rest.slice(cut + 1);
-        const ref = db.collection('map_rotations').doc(rotId);
-        const doc = await ref.get().catch(() => null);
-        if (!doc?.exists) return await interaction.editReply({ content: '❌ 這張排班表已經不存在了。', components: [] });
-        const rot = doc.data();
+        const { rotId, targetUid } = rotSplitIdUid(customId, 'rot_proxyslot_');
+        const rot = await fetchRotFast(rotId);
+        if (!rot) return await interaction.editReply({ content: '❌ 讀不到這張排班表。', components: [] });
         if (!rotCanProxy(rot, interaction)) {
           return await interaction.editReply({ content: '❌ 你沒有代登記的權限。', components: [] });
         }
-
-        const idx = parseInt(interaction.values[0]);
-        if (!Number.isFinite(idx) || idx < 0 || idx >= rot.slotCount) {
-          return await interaction.editReply({ content: '❌ 這個時段不存在。', components: [] });
+        const idxs = rotParseIdxList(interaction.values, rot);
+        if (!idxs.length) {
+          return await interaction.editReply({ content: '❌ 沒有有效的時段。', components: [] });
         }
-
-        const prof = (await fetchProfile(targetUid)).data;
-        const member = await interaction.guild.members.fetch(targetUid).catch(() => null);
-        const ign = prof.mainIgn || member?.displayName || '（未登記）';
-        const colors = rotAssignColor(rot, targetUid);
-        const occupant = {
-          userId: targetUid, ign,
-          by: interaction.user.id, at: Date.now()      // 代按紀錄
-        };
-
-        let slots;
-        try {
-          slots = await rotClaimSlot(ref, idx, occupant, { [`colors.${targetUid}`]: colors[targetUid] });
-        } catch (e) {
-          const msg = ROT_CLAIM_ERRORS[e.message];
-          if (!msg) console.error('代登記交易失敗:', e.message);
-          return await interaction.editReply({ content: msg || '⏳ 這次沒寫進去，請再試一次。', components: [] });
-        }
-
-        const merged = { ...rot, slots, colors };
-        cacheRot(rotId, merged);
-        await refreshRotationMessage(rotId, merged, interaction);
-        try {
-          const u = await client.users.fetch(targetUid);
-          await u.send(`👥 <@${interaction.user.id}> 幫你在 **${rot.mapName}** 的排隊表登記了 ${rotDayLabel(rotSlotMs(rot, idx))} ${rotSlotLabel(rot, idx)}，用的角色是 \`${ign}\`。\n不對的話到面板上用「❌ 取消時段」退掉就好。`);
-        } catch { /* 對方關私訊就算了 */ }
+        rotPendSet(rotId, interaction.user.id, targetUid, idxs);
+        const curIdx = rotCurrentIndex(rot);
+        const backCount = idxs.filter(i => i < curIdx).length;
         return await interaction.editReply({
-          content: `✅ 已幫 <@${targetUid}>（\`${ign}\`）登記 ${rotDayLabel(rotSlotMs(rot, idx))} ${rotSlotLabel(rot, idx)}，並已私訊通知本人。`,
-          components: []
+          content: `👥 要幫 <@${targetUid}> 登記 **${idxs.length} 段**：${rotSlotRangeLabel(rot, idxs)}`
+            + (backCount ? `\n⏪ 其中 ${backCount} 段是補登已經打完的時間。` : '')
+            + '\n\n**這批算誰的？**\n‧ 成員 → 照原本的規則分攤買圖錢\n‧ 外援 → 來幫忙顧圖，**完全不收費**（會再問角色名）',
+          components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`rot_pxgo_${rotId}_${targetUid}`).setLabel('✅ 以成員登記（要分攤）').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`rot_pxsos_${rotId}_${targetUid}`).setLabel('🆘 以外援登記（不分攤）').setStyle(ButtonStyle.Success)
+          )]
         });
       }
 
@@ -2910,18 +2912,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // 連已經過去的時段也列出來，才能補登「打完但忘了按」的班
         const curIdx = rotCurrentIndex(rot);
         const all = rotPickableIndexes(rot, targetUid, Date.now(), true);
-        // 以「現在」為中心取樣：往前最多 8 格、其餘留給未來，免得被過去的塞滿 25 個名額
-        const past = all.filter(p => p.idx < curIdx).slice(-8);
-        const future = all.filter(p => p.idx >= curIdx).slice(0, ROT_PICK_LIMIT - past.length);
-        const pick = [...past, ...future];
+        const { picked: pick, dropped } = rotWindow(all, curIdx, p => p.idx);
         if (!pick.length) {
           return await interaction.editReply({ content: `💡 <@${targetUid}> 沒有可以登記的時段（都滿了或都排過了）。`, components: [] });
         }
         return await interaction.editReply({
-          content: `👥 要幫 <@${targetUid}> 登記哪一段？\n*⏪ 開頭的是已經過去的時段，可以補登。*`,
+          content: `👥 要幫 <@${targetUid}> 登記哪些時段？**可以一次勾多個**。\n*⏪ 開頭的是已經過去的時段，勾了就是補登。*`
+            + (dropped ? `\n*可選的時段太多，選單一次只放得下 ${pick.length} 個；剩下的 ${dropped} 個等這批登記完再按一次就會出現。*` : ''),
           components: [new ActionRowBuilder().addComponents(
             new StringSelectMenuBuilder().setCustomId(`rot_proxyslot_${rotId}_${targetUid}`)
-              .setPlaceholder('選一個時段（含可補登的過去時段）')
+              .setPlaceholder(`選時段，可多選（最多 ${pick.length} 段）`)
+              .setMinValues(1).setMaxValues(pick.length)
               .addOptions(pick.map(p => new StringSelectMenuOptionBuilder()
                 .setLabel(`${p.idx < curIdx ? '⏪ ' : ''}${rotSlotLabel(rot, p.idx)}${p.n ? `　🤝 併團(${p.n}人)` : ''}`.slice(0, 100))
                 .setDescription(`${rotDayLabel(rotSlotMs(rot, p.idx))}${p.idx < curIdx ? '　（補登）' : ''}`.slice(0, 100))
@@ -2940,44 +2941,54 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return await interaction.followUp({ content: '❌ 這張排班表已經不存在了。', flags: MessageFlags.Ephemeral });
         }
         const rot = doc.data();
-        const idx = parseInt(interaction.values[0]);
-        const occupants = rotSlotUsers(rot, idx);
-        if (!occupants.length) {
-          return await interaction.followUp({ content: '💡 這個時段已經是空的了。', flags: MessageFlags.Ephemeral });
+        const idxs = rotParseIdxList(interaction.values, rot);
+        if (!idxs.length) {
+          return await interaction.followUp({ content: '❌ 沒有有效的時段。', flags: MessageFlags.Ephemeral });
         }
-
-        const isOwner = rotHasUser(rot, idx, interaction.user.id);
         const canForce = rot.creatorId === interaction.user.id
           || isSuperAdmin(interaction.user.id, interaction.memberPermissions);
-        if (!isOwner && !canForce) {
+
+        // 退班看的是「你在不在那一格」，不是「誰按的登記」——
+        // 所以別人代登記給你的班，你自己也退得掉。
+        // colors 保留不動，之後再排回來還是同一個顏色。
+        let res;
+        try {
+          res = await rotDropSlots(ref, idxs, interaction.user.id, canForce);
+        } catch (e) {
+          if (e.message !== 'GONE') console.error('退班交易失敗:', e.message);
           return await interaction.followUp({
-            content: `❌ 這格是 ${occupants.map(u => `<@${u.userId}>`).join('、')} 排的，只有本人、開表的人或管理員可以取消。`,
+            content: e.message === 'GONE' ? '❌ 這張排班表已經不存在了。' : '⏳ 這次沒寫進去，請再試一次。',
             flags: MessageFlags.Ephemeral
           });
         }
 
-        // 團練時一格有多人：本人只退自己，開表者／管理員代取消才整格清空。
-        // 只寫自己那一格（dot path），整塊 slots 覆寫會把別人剛搶到的格子抹掉。
-        // colors 保留不動，之後再排回來還是同一個顏色。
-        const remain = isOwner ? occupants.filter(u => u.userId !== interaction.user.id) : [];
-        const slots = rotSetSlot(rot.slots, idx, remain);
-        await ref.update(remain.length
-          ? { [`slots.${idx}`]: { users: remain } }
-          : { [`slots.${idx}`]: admin.firestore.FieldValue.delete() });
-
-        const merged = { ...rot, slots };
+        const merged = { ...rot, slots: res.slots };
         cacheRot(rotId, merged);
         await interaction.editReply({
           embeds: [buildRotationEmbed(merged)],
           components: buildRotationComponents(rotId, merged)
         });
-        return await interaction.followUp({
-          content: remain.length
-            ? `🗑️ 已退出 ${rotDayLabel(rotSlotMs(rot, idx))} ${rotSlotLabel(rot, idx)}，這格還有 ${remain.map(u => `<@${u.userId}>`).join('、')}。`
-            : `🗑️ 已清空 ${rotDayLabel(rotSlotMs(rot, idx))} ${rotSlotLabel(rot, idx)}`
-              + (isOwner ? '' : `（原本是 ${occupants.map(u => `<@${u.userId}>`).join('、')}，已代為取消）`),
-          flags: MessageFlags.Ephemeral
-        });
+
+        let note;
+        if (res.written.length) {
+          const forced = res.detail.filter(d => !d.isOwner);
+          note = `🗑️ 已退掉 ${res.written.length} 段：${rotSlotRangeLabel(rot, res.written)}`;
+          const kept = res.detail.filter(d => d.remain.length);
+          if (kept.length) {
+            note += '\n🤝 這幾段還有別人在：' + kept
+              .map(d => `${rotSlotLabel(rot, d.idx)} → ${d.remain.map(u => `<@${u.userId}>`).join('、')}`)
+              .join('；');
+          }
+          if (forced.length) {
+            note += '\n👮 代為取消：' + forced
+              .map(d => `${rotSlotLabel(rot, d.idx)}（原本是 ${d.occupants.map(u => `<@${u.userId}>`).join('、')}）`)
+              .join('；');
+          }
+        } else {
+          note = '😅 一段都沒退掉。';
+        }
+        if (res.skipped.length) note += '\n' + rotSkipReport(rot, res.skipped);
+        return await interaction.followUp({ content: note.slice(0, 1900), flags: MessageFlags.Ephemeral });
       }
 
       // 熱門地圖排隊：認領時段。沒開團練時一格只能一人，先搶先贏；開了團練則可併團。
@@ -2995,44 +3006,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return await interaction.followUp({ content: '🚪 這張排班表已經結束了。', flags: MessageFlags.Ephemeral });
         }
 
-        const idx = parseInt(interaction.values[0]);
-        if (!Number.isFinite(idx) || idx < 0 || idx >= rot.slotCount) {
-          return await interaction.followUp({ content: '❌ 這個時段不存在。', flags: MessageFlags.Ephemeral });
-        }
-        if (idx < rotCurrentIndex(rot)) {
-          return await interaction.followUp({ content: '⌛ 這個時段已經過去了，請按 🔄 即時更新看最新的表。', flags: MessageFlags.Ephemeral });
-        }
-        const current = rotSlotUsers(rot, idx);
-        if (rotHasUser(rot, idx, interaction.user.id)) {
-          return await interaction.followUp({ content: '💡 你已經在這個時段了。', flags: MessageFlags.Ephemeral });
-        }
-        if (current.length && !rot.allowShare) {
-          return await interaction.followUp({
-            content: `😅 慢了一步，${rotSlotLabel(rot, idx)} 已經被 <@${current[0].userId}> 接走了。請按 🔄 即時更新。`,
-            flags: MessageFlags.Ephemeral
-          });
-        }
-        if (current.length && current.length >= ROT_MAX_PER_SLOT) {
-          return await interaction.followUp({
-            content: `😅 ${rotSlotLabel(rot, idx)} 已經有 ${current.length} 個人，滿了。`,
-            flags: MessageFlags.Ephemeral
-          });
+        // 可以一次勾好幾段，而且過去的時段也能勾（補登「打完忘了按」的班）
+        const idxs = rotParseIdxList(interaction.values, rot);
+        if (!idxs.length) {
+          return await interaction.followUp({ content: '❌ 沒有有效的時段。', flags: MessageFlags.Ephemeral });
         }
 
         const prof = (await fetchProfile(interaction.user.id)).data;
         const ign = prof.mainIgn || interaction.member?.displayName || interaction.user.username;
-        const me = { userId: interaction.user.id, ign, at: Date.now() };
-        if (asSupport) me.support = true;            // 外援不分攤費用
         const colors = rotAssignColor(rot, interaction.user.id);
+        const curIdx = rotCurrentIndex(rot);
+        const at = Date.now();
 
-        let slots;
+        let res;
         try {
-          slots = await rotClaimSlot(ref, idx, me, { [`colors.${interaction.user.id}`]: colors[interaction.user.id] });
+          res = await rotClaimSlots(ref, idxs, () => {
+            const me = { userId: interaction.user.id, ign, at };
+            if (asSupport) me.support = true;        // 外援不分攤費用
+            return me;
+          }, { [`colors.${interaction.user.id}`]: colors[interaction.user.id] });
         } catch (e) {
-          const msg = e.message === 'DUP' ? '💡 你已經在這個時段了。'
-            : e.message === 'TAKEN' ? `😅 慢了一步，${rotSlotLabel(rot, idx)} 剛剛被別人接走了。請按 🔄 即時更新。`
-            : e.message === 'FULL' ? `😅 ${rotSlotLabel(rot, idx)} 人滿了。`
-            : ROT_CLAIM_ERRORS[e.message];
+          const msg = ROT_CLAIM_ERRORS[e.message];
           if (!msg) console.error('認領時段交易失敗:', e.message);
           return await interaction.followUp({
             content: msg || '⏳ 這次沒寫進去（可能同時有人在搶），請再按一次。',
@@ -3040,21 +3034,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
         }
 
-        const merged = { ...rot, slots, colors };
+        const merged = { ...rot, slots: res.slots, colors };
         cacheRot(rotId, merged);
         await interaction.editReply({
           embeds: [buildRotationEmbed(merged)],
           components: buildRotationComponents(rotId, merged)
         });
-        const mates = current.map(u => `<@${u.userId}>`).join('、');
-        const payers = [...current.filter(u => !u.support), ...(asSupport ? [] : [me])].length;
-        return await interaction.followUp({
-          content: `✅ ${rotDayLabel(rotSlotMs(rot, idx))} ${rotSlotLabel(rot, idx)} 登記完成，到點機器人會 tag 你。`
-            + (asSupport ? '\n🆘 你是**外援**，這段**不跟你收費**，謝謝幫忙顧圖！' : '')
-            + (mates ? `\n🤝 這格還有 ${mates}${payers > 1 ? `，費用由 ${payers} 位付費者均分` : ''}。` : '')
-            + '\n要反悔的話用下面的「❌ 取消時段」選單。',
-          flags: MessageFlags.Ephemeral
-        });
+
+        let note;
+        if (res.written.length) {
+          const ahead = res.written.filter(i => i >= curIdx).length;
+          const back = res.written.length - ahead;
+          note = `✅ 已登記 ${res.written.length} 段：${rotSlotRangeLabel(rot, res.written)}`
+            + (ahead ? `\n⏰ 其中 ${ahead} 段還沒到，到點機器人會 tag 你。` : '')
+            + (back ? `\n⏪ 其中 ${back} 段是補登已經打完的時間。` : '')
+            + (asSupport ? '\n🆘 你是**外援**，這些時段**不跟你收費**，謝謝幫忙顧圖！' : '')
+            + '\n要反悔的話用下面的「❌ 取消時段」選單。';
+        } else {
+          note = '😅 一段都沒寫進去。';
+        }
+        if (res.skipped.length) note += '\n' + rotSkipReport(rot, res.skipped);
+        return await interaction.followUp({ content: note.slice(0, 1900), flags: MessageFlags.Ephemeral });
       }
 
       // 管理員從全體總覽挑一個人看明細（唯讀，不給操作鈕免得改到別人的）
@@ -3880,6 +3880,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
           content: '✅ 排隊表開好了。**備註、團練、分攤方式**請用面板上的 ✏️ 修改內容 設定。',
           flags: MessageFlags.Ephemeral
         });
+      }
+
+      if (customId.startsWith('modal_rot_pxsos_')) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const { rotId, targetUid } = rotSplitIdUid(customId, 'modal_rot_pxsos_');
+        const idxs = rotPendTake(rotId, interaction.user.id, targetUid);
+        if (!idxs) return interaction.editReply(ROT_PEND_EXPIRED);
+        const ign = (interaction.fields.getTextInputValue('sos_ign') || '').trim();
+        if (!ign) return interaction.editReply('❌ 請填角色名。');
+        const msg = await rotProxyWrite(interaction, rotId, targetUid, idxs, { support: true, ign });
+        return interaction.editReply(msg.slice(0, 1900));
       }
 
       if (customId.startsWith('modal_rot_sos_')) {
@@ -5188,6 +5199,213 @@ async function rotClaimSlot(ref, idx, occupant, colorsPatch) {
   });
 }
 
+// 一次把一個人寫進多個格子。整批共用一次交易：讀一次、算完再一起寫。
+// 寫不進去的格子不丟錯，而是收進 skipped 回報 —— 補登一整晚的班時，
+// 卡在某一格就整批退回的話，使用者只能一直重試，永遠不知道卡在哪。
+async function rotClaimSlots(ref, idxs, makeOccupant, colorsPatch) {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new Error('GONE');
+    const live = snap.data();
+    if (live.isClosed) throw new Error('CLOSED');
+    const written = [], skipped = [];
+    let slots = live.slots || {};
+    const patch = {};
+    for (const idx of idxs) {
+      if (!Number.isFinite(idx) || idx < 0 || idx >= live.slotCount) { skipped.push({ idx, reason: 'BAD' }); continue; }
+      const nowUsers = rotSlotUsers({ slots }, idx);
+      const occupant = makeOccupant(idx);
+      if (nowUsers.some(u => u.userId === occupant.userId)) { skipped.push({ idx, reason: 'DUP' }); continue; }
+      if (nowUsers.length && !live.allowShare) { skipped.push({ idx, reason: 'TAKEN' }); continue; }
+      if (nowUsers.length >= ROT_MAX_PER_SLOT) { skipped.push({ idx, reason: 'FULL' }); continue; }
+      const users = [...nowUsers, occupant];
+      patch[`slots.${idx}`] = { users };          // 只動這幾格，不整塊覆寫
+      slots = rotSetSlot(slots, idx, users);
+      written.push(idx);
+    }
+    if (written.length) {
+      if (colorsPatch) Object.assign(patch, colorsPatch);
+      tx.update(snap.ref, patch);
+    }
+    return { slots, written, skipped };
+  });
+}
+
+const ROT_SKIP_LABEL = {
+  BAD: '時段不存在', DUP: '已經在裡面了', TAKEN: '已經被別人占走', FULL: '人滿了',
+  EMPTY: '本來就是空的', NOTYOURS: '不是你的班（要本人、開表者或管理員才能退）'
+};
+
+// 一次退掉多個格子。本人只退自己那一份（團練時別人還留著），
+// 開表者／管理員代退則整格清空。同樣只動指定的格子，不整塊覆寫 slots。
+async function rotDropSlots(ref, idxs, userId, canForce) {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new Error('GONE');
+    const live = snap.data();
+    const written = [], skipped = [], detail = [];
+    let slots = live.slots || {};
+    const patch = {};
+    for (const idx of idxs) {
+      if (!Number.isFinite(idx) || idx < 0 || idx >= live.slotCount) { skipped.push({ idx, reason: 'BAD' }); continue; }
+      const occupants = rotSlotUsers({ slots }, idx);
+      if (!occupants.length) { skipped.push({ idx, reason: 'EMPTY' }); continue; }
+      const isOwner = occupants.some(u => u.userId === userId);
+      if (!isOwner && !canForce) { skipped.push({ idx, reason: 'NOTYOURS' }); continue; }
+      const remain = isOwner ? occupants.filter(u => u.userId !== userId) : [];
+      patch[`slots.${idx}`] = remain.length
+        ? { users: remain }
+        : admin.firestore.FieldValue.delete();
+      slots = rotSetSlot(slots, idx, remain);
+      written.push(idx);
+      detail.push({ idx, isOwner, occupants, remain });
+    }
+    if (written.length) tx.update(snap.ref, patch);
+    return { slots, written, skipped, detail };
+  });
+}
+
+// 選單回來的值可能有好幾個：濾掉壞的、去重、照時間排好
+function rotParseIdxList(values, rot) {
+  const seen = new Set(), out = [];
+  for (const v of (values || [])) {
+    const n = parseInt(v, 10);
+    if (!Number.isFinite(n) || n < 0 || n >= rot.slotCount || seen.has(n)) continue;
+    seen.add(n); out.push(n);
+  }
+  return out.sort((a, b) => a - b);
+}
+
+// 把一串格子寫成人看得懂的範圍：連續的併成「09:00–11:00」，斷開的用、隔開。
+// 補登 8 格時列出 8 個時間沒人想讀。
+function rotSlotRangeLabel(rot, idxs) {
+  const sorted = [...idxs].sort((a, b) => a - b);
+  const parts = [];
+  let i = 0;
+  while (i < sorted.length) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
+    const a = sorted[i], b = sorted[j];
+    parts.push(`${rotDayLabel(rotSlotMs(rot, a))} ${rotTimeLabel(rotSlotMs(rot, a))}–${rotTimeLabel(rotSlotMs(rot, b) + rotSlotLen(rot) * 60000)}`);
+    i = j + 1;
+  }
+  return parts.join('、');
+}
+
+// 跳過的格子按原因歸類，一行一種原因
+function rotSkipReport(rot, skipped) {
+  const by = new Map();
+  for (const s of skipped) {
+    if (!by.has(s.reason)) by.set(s.reason, []);
+    by.get(s.reason).push(s.idx);
+  }
+  return [...by.entries()]
+    .map(([r, idxs]) => `⚠️ ${ROT_SKIP_LABEL[r] || r}，已跳過：${rotSlotRangeLabel(rot, idxs)}`)
+    .join('\n');
+}
+
+const ROT_PAST_QUOTA = 12;          // 選單裡最多留幾個可補登的過去時段（12 格 = 6 小時）
+
+// 選單只有 25 個名額。過去的格子不能把未來的擠掉，所以先讓未來的占位子，
+// 剩下的名額（最多 ROT_PAST_QUOTA 個）給最接近現在的過去時段；
+// 沒有未來時段時（表快跑完了），整個額度都讓給補登。
+function rotWindow(all, curIdx, getIdx = (x) => x, limit = ROT_PICK_LIMIT, pastQuota = ROT_PAST_QUOTA) {
+  const past = all.filter(x => getIdx(x) < curIdx);
+  const future = all.filter(x => getIdx(x) >= curIdx);
+  const futureKeep = future.slice(0, Math.max(0, limit - Math.min(pastQuota, past.length)));
+  const pastKeep = past.slice(-Math.max(0, limit - futureKeep.length));
+  return {
+    picked: [...pastKeep, ...futureKeep],
+    dropped: (past.length - pastKeep.length) + (future.length - futureKeep.length)
+  };
+}
+
+// 代登記選到一半的時段。按鈕和表單的 customId 只有 100 字，塞不下一串格號，
+// 所以先暫存在記憶體裡（10 分鐘就過期，重啟就沒了，反正是現場操作）。
+const ROT_PEND = new Map();
+const ROT_PEND_TTL = 10 * 60000;
+function rotPendKey(rotId, actorId, targetUid) { return `${rotId}:${actorId}:${targetUid}`; }
+function rotPendSet(rotId, actorId, targetUid, idxs) {
+  const cut = Date.now() - ROT_PEND_TTL;
+  for (const [k, v] of ROT_PEND) if (v.at < cut) ROT_PEND.delete(k);   // 順手清掉過期的
+  ROT_PEND.set(rotPendKey(rotId, actorId, targetUid), { idxs, at: Date.now() });
+}
+function rotPendPeek(rotId, actorId, targetUid) {
+  const key = rotPendKey(rotId, actorId, targetUid);
+  const v = ROT_PEND.get(key);
+  if (!v) return null;
+  if (Date.now() - v.at > ROT_PEND_TTL) { ROT_PEND.delete(key); return null; }
+  return v.idxs;
+}
+function rotPendTake(rotId, actorId, targetUid) {
+  const v = rotPendPeek(rotId, actorId, targetUid);
+  if (v) ROT_PEND.delete(rotPendKey(rotId, actorId, targetUid));
+  return v;
+}
+function rotSplitIdUid(customId, prefix) {
+  const rest = customId.replace(prefix, '');
+  const cut = rest.lastIndexOf('_');
+  return { rotId: rest.slice(0, cut), targetUid: rest.slice(cut + 1) };
+}
+const ROT_PEND_EXPIRED = '⌛ 這份選擇已經過期（超過 10 分鐘），請重新按「👥 代登記／墊付人」選一次。';
+
+// 代登記真正寫入的地方（成員與外援兩條路共用）。回傳一句要回給操作者的話。
+async function rotProxyWrite(interaction, rotId, targetUid, idxs, { support = false, ign: forcedIgn } = {}) {
+  const ref = db.collection('map_rotations').doc(rotId);
+  const doc = await ref.get().catch(() => null);
+  if (!doc?.exists) return '❌ 這張排班表已經不存在了。';
+  const rot = doc.data();
+  if (!rotCanProxy(rot, interaction)) return '❌ 你沒有代登記的權限。';
+
+  let ign = forcedIgn;
+  if (!ign) {
+    const prof = (await fetchProfile(targetUid)).data;
+    const member = await interaction.guild?.members.fetch(targetUid).catch(() => null);
+    ign = prof.mainIgn || member?.displayName || '（未登記）';
+  }
+  const colors = rotAssignColor(rot, targetUid);
+  const at = Date.now();
+
+  let res;
+  try {
+    res = await rotClaimSlots(ref, idxs, () => {
+      const o = { userId: targetUid, ign, by: interaction.user.id, at };   // 代按紀錄
+      if (support) o.support = true;                                      // 外援不分攤費用
+      return o;
+    }, { [`colors.${targetUid}`]: colors[targetUid] });
+  } catch (e) {
+    const msg = ROT_CLAIM_ERRORS[e.message];
+    if (!msg) console.error('代登記交易失敗:', e.message);
+    return msg || '⏳ 這次沒寫進去，請再試一次。';
+  }
+
+  const merged = { ...rot, slots: res.slots, colors };
+  cacheRot(rotId, merged);
+  await refreshRotationMessage(rotId, merged, interaction);
+
+  if (res.written.length) {
+    // 一則總結私訊就好。補登 8 格發 8 則私訊等於在轟炸當事人。
+    try {
+      const u = await client.users.fetch(targetUid);
+      await u.send(`👥 <@${interaction.user.id}> 幫你在 **${rot.mapName}** 的排隊表登記了 ${res.written.length} 段：\n${rotSlotRangeLabel(rot, res.written)}\n用的角色是 \`${ign}\`${support ? '（外援，不跟你收費）' : ''}。\n不對的話到面板上用「❌ 取消時段」退掉就好。`);
+    } catch { /* 對方關私訊就算了 */ }
+    if (support) {
+      try {
+        const ch = interaction.channel;
+        if (ch?.isTextBased()) {
+          await ch.send(`🆘 <@${targetUid}>（\`${ign}\`）幫忙顧 **${rot.mapName}** ${rotChanLabel(rot)} 的 ${rotSlotRangeLabel(rot, res.written)}，**不分攤費用**，感謝！`);
+        }
+      } catch { /* 沒發言權限就算了 */ }
+    }
+  }
+
+  let out = res.written.length
+    ? `✅ 已幫 <@${targetUid}>（\`${ign}\`${support ? '，外援不分攤' : ''}）登記 ${res.written.length} 段：${rotSlotRangeLabel(rot, res.written)}\n已私訊通知本人。`
+    : '😅 一段都沒寫進去。';
+  if (res.skipped.length) out += '\n' + rotSkipReport(rot, res.skipped);
+  return out;
+}
+
 const ROT_CLAIM_ERRORS = {
   GONE: '❌ 這張排班表已經不存在了。',
   CLOSED: '🚪 這張排班表已經結束了。',
@@ -5439,28 +5657,32 @@ function buildRotationComponents(rotId, rot, nowMs = Date.now()) {
     )
   ];
 
-  const pickable = rotPickableIndexes(rot, null, nowMs).slice(0, ROT_PICK_LIMIT);
+  // 這個面板是公開的、所有人共用一份，所以選單不能只列某個人的時段；
+  // 按下去之後才會按操作者的身分驗證一次。過去的時段也列出來讓人補登。
+  const curIdx = rotCurrentIndex(rot, nowMs);
+  const { picked: pickable } = rotWindow(rotPickableIndexes(rot, null, nowMs, true), curIdx, p => p.idx);
   if (pickable.length) {
     rows.push(new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder().setCustomId(`rot_take_${rotId}`)
-        .setPlaceholder(rot.allowShare ? '✋ 我要接這段 — 空的或併團都可以' : '✋ 我要接這段 — 選一個空的時段')
+        .setPlaceholder(`✋ 我要接這段／補登 — 可一次勾多段（最多 ${pickable.length}）`)
+        .setMinValues(1).setMaxValues(pickable.length)
         .addOptions(pickable.map(p => new StringSelectMenuOptionBuilder()
-          .setLabel((p.n ? `${rotSlotLabel(rot, p.idx)}　🤝 併團(${p.n}人)` : rotSlotLabel(rot, p.idx)).slice(0, 100))
-          .setDescription((p.n
-            ? `${rotDayLabel(rotSlotMs(rot, p.idx))}　已有：${rotSlotUsers(rot, p.idx).map(u => u.ign).join('、')}`
-            : rotDayLabel(rotSlotMs(rot, p.idx))).slice(0, 100))
+          .setLabel(`${p.idx < curIdx ? '⏪ ' : ''}${rotSlotLabel(rot, p.idx)}${p.n ? `　🤝 併團(${p.n}人)` : ''}`.slice(0, 100))
+          .setDescription(`${rotDayLabel(rotSlotMs(rot, p.idx))}${p.idx < curIdx ? '　（補登已打完的）' : ''}${p.n ? `　已有：${rotSlotUsers(rot, p.idx).map(u => u.ign).join('、')}` : ''}`.slice(0, 100))
           .setValue(String(p.idx))))
     ));
   }
 
-  // 取消自己的時段。認領選單只列空格子，沒有這個選單就沒有地方反悔。
-  const mine = rotAllTakenIndexes(rot, nowMs).slice(0, ROT_PICK_LIMIT);
+  // 退班的唯一出口。只列未來的話，補登錯的過去時段就沒地方取消了。
+  // 判定看的是「你在不在那一格」，所以別人代登記給你的班你也退得掉。
+  const { picked: mine } = rotWindow(rotAllTakenIndexes(rot, nowMs, true), curIdx, i => i);
   if (mine.length) {
     rows.push(new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder().setCustomId(`rot_drop_${rotId}`)
-        .setPlaceholder('❌ 取消時段 — 只能取消自己排的')
+        .setPlaceholder(`❌ 取消時段 — 有自己的都能退（含別人代排的），可多選`)
+        .setMinValues(1).setMaxValues(mine.length)
         .addOptions(mine.map(i => new StringSelectMenuOptionBuilder()
-          .setLabel(rotSlotLabel(rot, i).slice(0, 100))
+          .setLabel(`${i < curIdx ? '⏪ ' : ''}${rotSlotLabel(rot, i)}`.slice(0, 100))
           .setDescription(`${rotDayLabel(rotSlotMs(rot, i))}　${rotSlotUsers(rot, i).map(u => u.ign).join('、')}`.slice(0, 100))
           .setValue(String(i))))
     ));
@@ -5470,8 +5692,8 @@ function buildRotationComponents(rotId, rot, nowMs = Date.now()) {
 
 // 面板是公開的、所有人共用一份，所以選單不能只列某個人的時段。
 // 這裡列出所有「已被認領且還沒過去」的時段，按下去時才驗證是不是本人。
-function rotAllTakenIndexes(rot, nowMs = Date.now()) {
-  const from = Math.max(0, rotCurrentIndex(rot, nowMs));
+function rotAllTakenIndexes(rot, nowMs = Date.now(), includePast = false) {
+  const from = includePast ? 0 : Math.max(0, rotCurrentIndex(rot, nowMs));
   const out = [];
   for (let i = from; i < rot.slotCount; i++) if (rotSlotUsers(rot, i).length) out.push(i);
   return out;

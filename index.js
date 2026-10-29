@@ -129,7 +129,6 @@ const BOOK_SUCCESS_QUOTES = [
 
 const wizardSessionMap = new Map();
 const userChoiceMap = new Map();
-const expTrackerMap = new Map();
 
 function getRandomPityQuote() { return PITY_QUOTES[Math.floor(Math.random() * PITY_QUOTES.length)]; }
 function getRandomBookSuccessQuote() { return BOOK_SUCCESS_QUOTES[Math.floor(Math.random() * BOOK_SUCCESS_QUOTES.length)]; }
@@ -582,41 +581,6 @@ function buildWizardConfigCard(userId) {
   return { embeds: [embed], components: [rowJob, rowBtns] };
 }
 
-function createExpCalculatorEmbed(sessionData) {
-  const isRunning = !!sessionData?.startTime;
-  const lvText = sessionData?.startLevel ? `Lv.${sessionData.startLevel}` : '未設定';
-  const expStartText = sessionData?.expStart !== undefined ? sessionData.expStart.toLocaleString() : '未設定';
-  const mesoStartText = sessionData?.mesoStart ? formatMeso(sessionData.mesoStart) : '未設定';
-
-  return new EmbedBuilder()
-    .setColor(isRunning ? 0xFEE75C : 0x3498DB)
-    .setTitle('📊 練等經驗與楓幣效率計算器（阿泰爾）')
-    .setDescription(
-      isRunning
-        ? `⏱️ **計時進行中！**\n` +
-          `⏰ **開始時間**：<t:${Math.floor(sessionData.startTime / 1000)}:T> (<t:${Math.floor(sessionData.startTime / 1000)}:R>)\n` +
-          `⚔️ **起始等級**：\`${lvText}\`\n` +
-          `📊 **起始經驗值**：\`${expStartText} EXP\`\n` +
-          `💰 **起始金幣量**：\`${mesoStartText}\`\n\n` +
-          `💡 練完後請點擊下方 **「🛑 結束計算」**（點擊瞬間立即暫停計時），填寫結束數據即可自動精算！`
-        : `✨ 點擊下方 **「⏱️ 開始計算」** 輸入起始等級與數據後將自動開始計時！\n即使練等中途**升級**，系統也會透過經典經驗表精準換算為 **標準 10 分鐘與 1 小時產出**！`
-    )
-    .setFooter({ text: '楓之谷練等工具箱 | 升級防呆精算' });
-}
-
-function createExpCalculatorComponents(isRunning = false) {
-  const row = new ActionRowBuilder();
-  if (!isRunning) {
-    row.addComponents(new ButtonBuilder().setCustomId('exp_calc_trigger_start').setLabel('⏱️ 開始計算').setStyle(ButtonStyle.Success));
-  } else {
-    row.addComponents(
-      new ButtonBuilder().setCustomId('exp_calc_stop').setLabel('🛑 結束計算 (暫停計時)').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('exp_calc_cancel').setLabel('❌ 取消計時').setStyle(ButtonStyle.Secondary)
-    );
-  }
-  return [row];
-}
-
 // ==========================================
 // 揪團面板建構：簡化面板 (隊長、日期、時間、總人數、隊伍Buff、參加成員)
 // ==========================================
@@ -856,10 +820,6 @@ const commands = [
     .addStringOption(o => o.setName('每日目標經驗').setDescription('每天預計打多少經驗值 (例: 2000w、1e)').setRequired(false)),
 
   new SlashCommandBuilder()
-    .setName('經驗計算器')
-    .setDescription('測量練等經驗值與楓幣收益 (換算為標準 10 分鐘效率，支援跨等級計算)'),
-
-  new SlashCommandBuilder()
     .setName('賭局')
     .setDescription('發起社群競猜 - 題目與選項都自己寫'),
 
@@ -874,30 +834,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('地圖')
-    .setDescription('地圖｜接圖排隊')
-    .addSubcommand(sc => sc
-      .setName('放圖')
-      .setDescription('要離開了，把圖交接給公會的人')
-      .addStringOption(o => o.setName('地圖名稱').setDescription('例如：忘卻6、蛋龍').setRequired(true))
-      .addIntegerOption(o => o.setName('頻道').setDescription('頻道號碼').setRequired(true).setMinValue(1))
-      .addStringOption(o => o.setName('預計多久離開').setDescription('例如：10分鐘後、21:30').setRequired(true))
-      .addStringOption(o => o.setName('備註說明').setDescription('選填說明').setRequired(false)))
-    .addSubcommand(sc => sc
-      .setName('熱門地圖排隊')
-      .setDescription('開一張輪流接圖的排隊表，大家自己認領時段')
-      .addStringOption(o => o.setName('地圖名稱').setDescription('例如：忘卻6、蛋龍').setRequired(true))
-      .addStringOption(o => o.setName('備註').setDescription('例如：連打不洗頻、提前5分鐘到場').setRequired(false))
-      .addIntegerOption(o => o.setName('頻道').setDescription('還沒決定可以不填，之後用「📺 改頻道」補').setRequired(false).setMinValue(1))
-      .addStringOption(o => o.setName('開始時間').setDescription('例如 08:45 或 10/30 08:45，不填＝現在').setRequired(false))
-      .addStringOption(o => o.setName('結束時間').setDescription('例如 09:45 或 10/30 09:45，可單獨填').setRequired(false))
-      .addIntegerOption(o => o.setName('排班時數').setDescription('沒填結束時間時用這個，1 ~ 48，預設 48').setRequired(false).setMinValue(1).setMaxValue(48))
-      .addBooleanOption(o => o.setName('團練').setDescription('開啟後同一時段可以多人一起登記，費用該格均分').setRequired(false))
-      .addStringOption(o => o.setName('買圖價格').setDescription('這張圖花多少錢，例如 5000w。不填＝免費團').setRequired(false))
-      .addStringOption(o => o.setName('分攤方式').setDescription('怎麼跟大家收錢，預設均攤（結算時可改）').setRequired(false)
-        .addChoices(
-          { name: '均攤 — 有打的人平均分', value: 'even' },
-          { name: '按時間攤 — 依各自佔的時段比例', value: 'time' }
-        ))),
+    .setDescription('地圖｜接圖排隊 — 放圖交接、輪流排隊'),
 
   new SlashCommandBuilder()
     .setName('幸運頻道')
@@ -1304,16 +1241,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply({ embeds: [embed] });
       }
 
-      // 4. /經驗計算器
-      if (commandName === '經驗計算器') {
-        const session = expTrackerMap.get(interaction.user.id);
-        return await interaction.reply({
-          embeds: [createExpCalculatorEmbed(session)],
-          components: createExpCalculatorComponents(!!session?.startTime),
-          flags: MessageFlags.Ephemeral
-        });
-      }
-
       // 6. /揪團 (嚴格日期時間格式驗證)
       if (commandName === '揪團') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', flags: MessageFlags.Ephemeral });
@@ -1617,95 +1544,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       // 9. 其他指令 (放圖、幸運頻道)
-      if (commandName === '地圖' && interaction.options.getSubcommand() === '放圖') {
+      // /地圖 只負責開一個選單面板，實際的參數由各自的表單收集
+      if (commandName === '地圖') {
         if (!db) return interaction.reply({ content: '❌ 資料庫未連線', flags: MessageFlags.Ephemeral });
-        await interaction.deferReply();
-        const mapName = interaction.options.getString('地圖名稱');
-        const channelNum = interaction.options.getInteger('頻道');
-        const leaveTime = interaction.options.getString('預計多久離開');
-        const note = interaction.options.getString('備註說明') || '無特殊備註';
-
-        const mapRef = db.collection('map_shares').doc();
-        const mapData = {
-          id: mapRef.id, creatorId: interaction.user.id, mapName, channelNum, leaveTime, note,
-          takerId: null, isFinished: false, createdAt: admin.firestore.FieldValue.serverTimestamp()
-        };
-        const msg = await interaction.editReply({
-          embeds: [createMapEmbed(mapData)],
-          components: createMapComponents(mapRef.id, mapData)
+        const embed = new EmbedBuilder()
+          .setColor(0x3498DB)
+          .setTitle('🗺️【地圖｜接圖排隊】')
+          .setDescription(
+            '**🗺️ 放圖** — 你要離開了，把目前的圖交接給公會的人\n'
+            + '**🗓️ 熱門地圖排隊** — 開一張輪流接圖的排隊表，大家自己認領時段\n'
+            + `${PANEL_DIV}\n*選一個，接著填資料。*`
+          );
+        return await interaction.reply({
+          embeds: [embed],
+          components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('map_menu_share').setLabel('🗺️ 放圖').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('map_menu_queue').setLabel('🗓️ 熱門地圖排隊').setStyle(ButtonStyle.Primary)
+          )],
+          flags: MessageFlags.Ephemeral
         });
-        mapData.channelId = interaction.channelId;
-        mapData.messageId = msg.id;
-        await mapRef.set(mapData);
-        return;
-      }
-
-      if (commandName === '地圖' && interaction.options.getSubcommand() === '熱門地圖排隊') {
-        if (!db) return interaction.reply({ content: '❌ 資料庫未連線', flags: MessageFlags.Ephemeral });
-        await interaction.deferReply();
-
-        const slotMinutes = ROT_SLOT_MIN;   // 一格固定 60 分鐘
-        const now = Date.now();
-
-        const startRaw = interaction.options.getString('開始時間');
-        const endRaw = interaction.options.getString('結束時間');
-
-        let startMs;
-        if (startRaw) {
-          const parsed = rotParseWhen(startRaw, now);
-          if (parsed === null) {
-            return await interaction.editReply('❌ 看不懂開始時間。可以寫 \`20:00\`、\`10/28 20:00\` 或 \`2026-10-28 20:00\`。');
-          }
-          startMs = parsed;   // 照填的時間走，08:45 就是 08:45，不壓回整點
-        } else {
-          startMs = rotAlignStart(now, slotMinutes);
-        }
-
-        let spanHours;
-        if (endRaw) {
-          let endMs = rotParseWhen(endRaw, startMs);
-          if (endMs === null) {
-            return await interaction.editReply('❌ 看不懂結束時間。可以寫 \`08:00\`、\`10/29 08:00\` 或 \`2026-10-29 08:00\`。');
-          }
-          if (endMs <= startMs) endMs += 86400000;          // 跨夜：結束比開始早就是隔天
-          spanHours = (endMs - startMs) / 3600000;
-          if (spanHours > ROT_MAX_SPAN_H) {
-            return await interaction.editReply(`❌ 一張表最長只能 ${ROT_MAX_SPAN_H} 小時，你設定的是 ${spanHours.toFixed(1)} 小時。`);
-          }
-        } else {
-          spanHours = interaction.options.getInteger('排班時數') || ROT_SPAN_HOURS;
-        }
-        spanHours = Math.min(ROT_MAX_SPAN_H, Math.max(ROT_MIN_SPAN_H, spanHours));
-        const slotCount = Math.max(1, Math.round((spanHours * 60) / slotMinutes));
-        const buyPrice = parseMoneyInput(interaction.options.getString('買圖價格'));
-        const splitMode = interaction.options.getString('分攤方式') === ROT_SPLIT_TIME ? ROT_SPLIT_TIME : ROT_SPLIT_EVEN;
-        const allowShare = interaction.options.getBoolean('團練') === true;
-
-        const ref = db.collection('map_rotations').doc();
-        const rot = {
-          id: ref.id,
-          creatorId: interaction.user.id,
-          creatorTag: interaction.member?.displayName || interaction.user.username,
-          creatorAvatar: interaction.user.displayAvatarURL(),
-          mapName: interaction.options.getString('地圖名稱'),
-          channelNum: interaction.options.getInteger('頻道') || 0,   // 0 = 還沒決定
-          note: interaction.options.getString('備註') || '無特殊備註',
-          slotMinutes, startMs, slotCount, spanHours,
-          buyPrice, splitMode, allowShare, sellPrice: 0, settled: false,
-          gapAsked: [],
-          slots: {}, colors: {}, isClosed: false, notifiedIdx: -1, preNotified: [],
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        };
-
-        const msg = await interaction.editReply({
-          embeds: [buildRotationEmbed(rot)],
-          components: buildRotationComponents(ref.id, rot)
-        });
-        rot.channelId = interaction.channelId;
-        rot.messageId = msg.id;
-        await ref.set(rot);
-        cacheRot(ref.id, rot);
-        return;
       }
 
       if (commandName === '幸運頻道') {
@@ -1723,54 +1580,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ----------------------------------------
     if (interaction.isButton()) {
       const customId = interaction.customId;
-
-      // 1. 經驗計算器
-      if (customId === 'exp_calc_trigger_start') {
-        const modal = new ModalBuilder().setCustomId('modal_exp_calc_start').setTitle('開始計算 - 輸入起始數據');
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_start_level').setLabel('1. 起始等級 (1 ~ 199)').setValue('175').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_exp_start').setLabel('2. 起始經驗值 (支援數字或 68%)').setPlaceholder('例如：383699046 或 68.65%').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_meso_start').setLabel('3. 起始金幣 (填了才算金幣效益)').setPlaceholder('例如：500w 或 5000000').setStyle(TextInputStyle.Short).setRequired(false))
-        );
-        return await interaction.showModal(modal);
-      }
-
-      if (customId === 'exp_calc_cancel') {
-        expTrackerMap.delete(interaction.user.id);
-        const embed = createExpCalculatorEmbed(null);
-        const comps = createExpCalculatorComponents(false);
-        return await interaction.update({ embeds: [embed], components: comps });
-      }
-
-      if (customId === 'exp_calc_stop') {
-        const session = expTrackerMap.get(interaction.user.id);
-        if (!session?.startTime) return interaction.reply({ content: '⚠️ 計時尚未開始，請先點擊開始！', flags: MessageFlags.Ephemeral });
-
-        session.stopTime = Date.now();
-        expTrackerMap.set(interaction.user.id, session);
-
-        const modal = new ModalBuilder().setCustomId('modal_exp_calc_finish').setTitle('結束計算 - 輸入結束數據');
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_end_level').setLabel('1. 結束等級 (若升級請填新等級)').setValue(`${session.startLevel || 175}`).setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_exp_end').setLabel('2. 結束經驗值 (支援數字或 72%)').setPlaceholder('例如：412500000 或 72%').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('input_meso_end').setLabel('3. 結束金幣 (填了才算金幣效益)').setPlaceholder('例如：420w 或 4200000').setStyle(TextInputStyle.Short).setRequired(false))
-        );
-        return await interaction.showModal(modal);
-      }
-
-      if (customId === 'exp_calc_trigger_share') {
-        const report = expTrackerMap.get(`report_${interaction.user.id}`);
-        if (!report) return interaction.reply({ content: '❌ 報告已失效，請重新計算！', flags: MessageFlags.Ephemeral });
-
-        const modal = new ModalBuilder().setCustomId('modal_exp_calc_share').setTitle('📢 分享效率報告至頻道');
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('share_map_name').setLabel('地圖名稱 (必填)').setPlaceholder('例如：忘卻6、神木村、神殿').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('share_job').setLabel('職業 (必填)').setValue('黑騎士').setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('share_level').setLabel('等級 (必填)').setValue(`${report.endLevel || report.startLevel || 175}`).setStyle(TextInputStyle.Short).setRequired(true)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('share_note').setLabel('備註說明 (選填)').setPlaceholder('例如：單練、開雙倍、自帶祈禱機').setStyle(TextInputStyle.Paragraph).setRequired(false))
-        );
-        return await interaction.showModal(modal);
-      }
 
       // 2. 報到精靈
       if (customId === 'btn_trigger_wizard_main') {
@@ -2326,6 +2135,48 @@ client.on(Events.InteractionCreate, async (interaction) => {
           jumpUrl, hint: jumpUrl ? '要操作請點原面板' : null
         });
         return await replyShareResult(interaction, okFlag);
+      }
+
+      // ── 🗺️ /地圖 選單：兩個子項目各自跳表單 ──
+      if (customId === 'map_menu_share') {
+        const modal = new ModalBuilder().setCustomId('modal_map_share_new').setTitle('放圖交接');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('ms_map').setLabel('地圖名稱')
+              .setPlaceholder('例如：忘卻6、蛋龍').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('ms_chan').setLabel('頻道號碼')
+              .setPlaceholder('例如：12').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('ms_leave').setLabel('預計多久離開')
+              .setPlaceholder('例如：10分鐘後、21:30').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('ms_note').setLabel('備註說明（選填）')
+              .setStyle(TextInputStyle.Paragraph).setRequired(false))
+        );
+        return await interaction.showModal(modal);
+      }
+
+      if (customId === 'map_menu_queue') {
+        const modal = new ModalBuilder().setCustomId('modal_map_queue_new').setTitle('開一張排隊表');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('mq_map').setLabel('地圖名稱')
+              .setPlaceholder('例如：忘卻6、蛋龍').setStyle(TextInputStyle.Short).setRequired(true)),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('mq_chan').setLabel('頻道（還沒決定就留空）')
+              .setStyle(TextInputStyle.Short).setRequired(false)),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('mq_start').setLabel('開始時間（留空＝現在）')
+              .setPlaceholder('08:45　或　10/30 08:45').setStyle(TextInputStyle.Short).setRequired(false)),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('mq_end').setLabel('結束時間，或直接填幾小時')
+              .setPlaceholder('09:45　或　填 4 代表 4 小時　‧　留空＝48 小時').setStyle(TextInputStyle.Short).setRequired(false)),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('mq_buy').setLabel('買圖價格（留空＝免費團）')
+              .setPlaceholder('例如 5000w').setStyle(TextInputStyle.Short).setRequired(false))
+        );
+        return await interaction.showModal(modal);
       }
 
       // ── 📺 改頻道：有排班的人都能改（頻道常常臨時換） ──
@@ -3415,144 +3266,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isModalSubmit()) {
       const customId = interaction.customId;
 
-      // 1. 經驗計算器開始
-      if (customId === 'modal_exp_calc_start') {
-        const startLevel = Math.min(199, Math.max(1, parseInt(interaction.fields.getTextInputValue('input_start_level')) || 175));
-        const rawExp = interaction.fields.getTextInputValue('input_exp_start');
-        const expStart = parseExpInput(rawExp, startLevel);
-        const mesoStart = parseMoneyInput(interaction.fields.getTextInputValue('input_meso_start'));
-        const startTime = Date.now();
-
-        const session = { startTime, startLevel, expStart, mesoStart };
-        expTrackerMap.set(interaction.user.id, session);
-
-        const embed = createExpCalculatorEmbed(session);
-        const comps = createExpCalculatorComponents(true);
-        return await interaction.update({ content: `✅ **已成功鎖定 Lv.${startLevel} 起始數據，計時開始！**`, embeds: [embed], components: comps });
-      }
-
-      // 2. 經驗計算器結束
-      if (customId === 'modal_exp_calc_finish') {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const session = expTrackerMap.get(interaction.user.id);
-        if (!session?.startTime) return interaction.editReply('❌ 計時已失效，請重新開始！');
-
-        const endTime = session.stopTime || Date.now();
-        const durationSec = Math.max(1, Math.round((endTime - session.startTime) / 1000));
-        const durationMinText = `${Math.floor(durationSec / 60)} 分 ${durationSec % 60} 秒`;
-
-        const endLevel = Math.min(200, Math.max(1, parseInt(interaction.fields.getTextInputValue('input_end_level')) || session.startLevel));
-        const rawExpEnd = interaction.fields.getTextInputValue('input_exp_end');
-        const expEnd = parseExpInput(rawExpEnd, endLevel);
-
-        let totalGainExp = 0;
-        if (endLevel === session.startLevel) {
-          totalGainExp = Math.max(0, expEnd - session.expStart);
-        } else if (endLevel > session.startLevel) {
-          const startLvNeed = CLASSIC_EXP_TABLE[session.startLevel] || 1;
-          totalGainExp = Math.max(0, startLvNeed - session.expStart);
-          for (let lv = session.startLevel + 1; lv < endLevel; lv++) {
-            totalGainExp += (CLASSIC_EXP_TABLE[lv] || 0);
-          }
-          totalGainExp += expEnd;
-        } else {
-          totalGainExp = Math.max(0, expEnd - session.expStart);
-        }
-
-        const rawMesoEnd = interaction.fields.getTextInputValue('input_meso_end');
-        const mesoEnd = parseMoneyInput(rawMesoEnd);
-        const hasMeso = session.mesoStart > 0 || !!(rawMesoEnd && rawMesoEnd.trim());
-        const deltaMeso = mesoEnd - session.mesoStart;
-
-        const expPer10Min = Math.round((totalGainExp / durationSec) * 600);
-        const expPerHour = Math.round((totalGainExp / durationSec) * 3600);
-        const mesoPer10Min = Math.round((deltaMeso / durationSec) * 600);
-        const mesoPerHour = Math.round((deltaMeso / durationSec) * 3600);
-
-        let mesoReport = '';
-        if (hasMeso) {
-          const sign10 = mesoPer10Min >= 0 ? '🟢 淨賺' : '🔴 虧損';
-          const signHour = mesoPerHour >= 0 ? '🟢 淨賺' : '🔴 虧損';
-          mesoReport = `━━━━━━━━━━━━━━━━━━━━\n` +
-            `💰 **實測金幣收支**：\`${deltaMeso >= 0 ? '+' : ''}${formatMeso(deltaMeso)}\`\n` +
-            `💵 **10 分鐘金幣效益**：${sign10} \`${formatMeso(Math.abs(mesoPer10Min))}\`\n` +
-            `🏦 **1 小時金幣效益**：${signHour} \`${formatMeso(Math.abs(mesoPerHour))}\``;
-        } else {
-          mesoReport = `━━━━━━━━━━━━━━━━━━━━\n` +
-            `💵 **10 分鐘金幣效益**：\`未計算\`\n` +
-            `└ 下次開始與結束時一併填入「金幣」欄位，就會自動算出金幣效益。`;
-        }
-
-        const reportData = {
-          durationMinText, durationSec, deltaExp: totalGainExp,
-          expPer10Min, expPerHour, hasMeso, deltaMeso, mesoPer10Min, mesoPerHour,
-          startLevel: session.startLevel, endLevel
-        };
-        expTrackerMap.set(`report_${interaction.user.id}`, reportData);
-        expTrackerMap.delete(interaction.user.id);
-
-        const levelUpTag = endLevel > session.startLevel ? ` 🆙 **(恭喜升級！Lv.${session.startLevel} ➔ Lv.${endLevel})**` : '';
-
-        const reportEmbed = new EmbedBuilder()
-          .setColor(0x57F287)
-          .setTitle(`📈【練等效率分析報告出爐】${levelUpTag}`)
-          .setDescription(
-            `⏱️ **實測時間**：\`${durationMinText}\` (共 ${durationSec} 秒)\n` +
-            `📊 **實測獲得總經驗**：\`+${totalGainExp.toLocaleString()} EXP\`\n` +
-            `━━━━━━━━━━━━━━━━━━━━\n` +
-            `⚡ **標準 10 分鐘效率**：\`+${expPer10Min.toLocaleString()} EXP\`\n` +
-            `🔥 **預估 1 小時效率**：\`+${expPerHour.toLocaleString()} EXP\`\n` +
-            mesoReport
-          )
-          .setFooter({ text: '練等效益精算 | 點擊下方按鈕可將結果分享至頻道！' });
-
-        const rowShare = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('exp_calc_trigger_share').setLabel('📢 分享至頻道').setStyle(ButtonStyle.Primary)
-        );
-        return await interaction.editReply({ embeds: [reportEmbed], components: [rowShare] });
-      }
-
-      // 3. 經驗計算器分享
-      if (customId === 'modal_exp_calc_share') {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const report = expTrackerMap.get(`report_${interaction.user.id}`);
-        if (!report) return interaction.editReply('❌ 報告已失效，請重新計算！');
-
-        const mapName = interaction.fields.getTextInputValue('share_map_name').trim();
-        const job = interaction.fields.getTextInputValue('share_job').trim();
-        const level = interaction.fields.getTextInputValue('share_level').trim();
-        const note = interaction.fields.getTextInputValue('share_note')?.trim() || '無特殊備註';
-
-        let mesoReport = '';
-        if (report.hasMeso) {
-          const sign10 = report.mesoPer10Min >= 0 ? '🟢 淨賺' : '🔴 虧損';
-          mesoReport = `\n💵 **10 分鐘金幣效益**：${sign10} \`${formatMeso(Math.abs(report.mesoPer10Min))}\``;
-        }
-
-        const shareEmbed = new EmbedBuilder()
-          .setColor(0x3498DB)
-          .setTitle(`📢【練等效率分享】${mapName}`)
-          .setDescription(
-            `👤 **冒險家**：<@${interaction.user.id}>\n` +
-            `⚔️ **職業/等級**：\`${job} (Lv.${level})\`\n` +
-            `📍 **練等地點**：\`${mapName}\`\n` +
-            `⏱️ **實測時間**：\`${report.durationMinText}\`\n` +
-            `━━━━━━━━━━━━━━━━━━━━\n` +
-            `⚡ **標準 10 分鐘經驗**：\`+${report.expPer10Min.toLocaleString()} EXP\`\n` +
-            `🔥 **預估 1 小時經驗**：\`+${report.expPerHour.toLocaleString()} EXP\`` +
-            mesoReport + `\n` +
-            `━━━━━━━━━━━━━━━━━━━━\n` +
-            `📝 **備註說明**：\`${note}\``
-          )
-          .setFooter({ text: '社群效率分享庫 | 感謝分享' });
-
-        const targetCh = interaction.channel || await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
-        if (targetCh && targetCh.isTextBased()) {
-          await targetCh.send({ embeds: [shareEmbed] }).catch(() => {});
-        }
-        return await interaction.editReply('✅ 成功將效率報告分享至頻道！');
-      }
-
       // 4. 報到精靈提交
       if (customId === 'modal_wizard_step1_main') {
         const nickname = interaction.fields.getTextInputValue('wiz_nickname').trim();
@@ -3768,6 +3481,106 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // 12. 名片更新等級
       // 12. 一次更新所有角色等級
+      // ── /地圖 的兩張建立表單 ──
+      if (customId === 'modal_map_share_new') {
+        await interaction.deferReply();
+        const mapName = interaction.fields.getTextInputValue('ms_map').trim();
+        const channelNum = parseInt(String(interaction.fields.getTextInputValue('ms_chan')).replace(/[^0-9]/g, ''));
+        if (!Number.isFinite(channelNum) || channelNum < 1) {
+          return await interaction.editReply('❌ 頻道要填數字，例如 `12`。');
+        }
+        const leaveTime = interaction.fields.getTextInputValue('ms_leave').trim();
+        const note = (interaction.fields.getTextInputValue('ms_note') || '').trim() || '無特殊備註';
+
+        const mapRef = db.collection('map_shares').doc();
+        const mapData = {
+          id: mapRef.id, creatorId: interaction.user.id, mapName, channelNum, leaveTime, note,
+          takerId: null, isFinished: false, createdAt: admin.firestore.FieldValue.serverTimestamp()
+        };
+        const msg = await interaction.editReply({
+          embeds: [createMapEmbed(mapData)],
+          components: createMapComponents(mapRef.id, mapData)
+        });
+        mapData.channelId = interaction.channelId;
+        mapData.messageId = msg.id;
+        await mapRef.set(mapData);
+        return;
+      }
+
+      if (customId === 'modal_map_queue_new') {
+        await interaction.deferReply();
+        const slotMinutes = ROT_SLOT_MIN;   // 一格固定 60 分鐘
+        const now = Date.now();
+
+        const mapName = interaction.fields.getTextInputValue('mq_map').trim();
+        const chanRaw = String(interaction.fields.getTextInputValue('mq_chan') || '').replace(/[^0-9]/g, '');
+        const startRaw = (interaction.fields.getTextInputValue('mq_start') || '').trim();
+        const endRaw = (interaction.fields.getTextInputValue('mq_end') || '').trim();
+        const buyPrice = parseMoneyInput(interaction.fields.getTextInputValue('mq_buy'));
+
+        let startMs;
+        if (startRaw) {
+          const parsed = rotParseWhen(startRaw, now);
+          if (parsed === null) {
+            return await interaction.editReply('❌ 看不懂開始時間。可以寫 `08:45`、`10/30 08:45` 或 `2026-10-30 08:45`。');
+          }
+          startMs = parsed;   // 照填的時間走，08:45 就是 08:45，不壓回整點
+        } else {
+          startMs = rotAlignStart(now, slotMinutes);
+        }
+
+        let spanHours;
+        if (endRaw) {
+          // 「結束時間或時數」一格兩用：純數字當小時數，有冒號就當時刻
+          if (/^\d{1,3}(\.\d+)?$/.test(endRaw)) {
+            spanHours = parseFloat(endRaw);
+          } else {
+            let endMs = rotParseWhen(endRaw, startMs);
+            if (endMs === null) {
+              return await interaction.editReply('❌ 看不懂結束時間。可以寫 `09:45`、`10/30 09:45`，或直接填數字代表幾小時。');
+            }
+            if (endMs <= startMs) endMs += 86400000;      // 跨夜
+            spanHours = (endMs - startMs) / 3600000;
+          }
+          if (spanHours > ROT_MAX_SPAN_H) {
+            return await interaction.editReply(`❌ 一張表最長只能 ${ROT_MAX_SPAN_H} 小時，你設定的是 ${spanHours.toFixed(1)} 小時。`);
+          }
+        } else {
+          spanHours = ROT_SPAN_HOURS;
+        }
+        spanHours = Math.min(ROT_MAX_SPAN_H, Math.max(ROT_MIN_SPAN_H, spanHours));
+        const slotCount = Math.max(1, Math.round((spanHours * 60) / slotMinutes));
+
+        const ref = db.collection('map_rotations').doc();
+        const rot = {
+          id: ref.id,
+          creatorId: interaction.user.id,
+          creatorTag: interaction.member?.displayName || interaction.user.username,
+          creatorAvatar: interaction.user.displayAvatarURL(),
+          mapName,
+          channelNum: parseInt(chanRaw) || 0,          // 0 = 還沒決定
+          note: '無特殊備註',
+          slotMinutes, startMs, slotCount, spanHours,
+          buyPrice, splitMode: ROT_SPLIT_EVEN, allowShare: false, sellPrice: 0, settled: false,
+          gapAsked: [],
+          slots: {}, colors: {}, isClosed: false, notifiedIdx: -1, preNotified: [],
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        };
+
+        const msg = await interaction.editReply({
+          embeds: [buildRotationEmbed(rot)],
+          components: buildRotationComponents(ref.id, rot)
+        });
+        rot.channelId = interaction.channelId;
+        rot.messageId = msg.id;
+        await ref.set(rot);
+        cacheRot(ref.id, rot);
+        return await interaction.followUp({
+          content: '✅ 排隊表開好了。**備註、團練、分攤方式**請用面板上的 ✏️ 修改內容 設定。',
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
       if (customId.startsWith('modal_rot_chan_')) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const rotId = customId.replace('modal_rot_chan_', '');
@@ -4762,12 +4575,6 @@ function rotSetSlot(slots, idx, users) {
   else next[String(idx)] = { users };
   return next;
 }
-// 一格有 n 個人分攤，每個人在這一格只算 1/n
-function rotSlotShare(rot, idx) {
-  const n = rotSlotUsers(rot, idx).length;
-  return n ? 1 / n : 0;
-}
-
 function rotTimeLabel(ms) {
   const d = new Date(ms + TPE_OFFSET_MS);
   return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
@@ -4775,10 +4582,6 @@ function rotTimeLabel(ms) {
 function rotDayLabel(ms) {
   const d = new Date(ms + TPE_OFFSET_MS);
   return `${d.getUTCMonth() + 1}/${d.getUTCDate()} (${ROT_WEEKDAY[d.getUTCDay()]})`;
-}
-function rotDayKey(ms) {
-  const d = new Date(ms + TPE_OFFSET_MS);
-  return `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
 }
 function rotSlotLabel(rot, idx) {
   const a = rotSlotMs(rot, idx), b = a + rotSlotLen(rot) * 60000;
@@ -4818,13 +4621,6 @@ function rotPickableIndexes(rot, userId, nowMs = Date.now()) {
   }
   return out;
 }
-function rotMyIndexes(rot, userId, nowMs = Date.now()) {
-  const from = Math.max(0, rotCurrentIndex(rot, nowMs));
-  const out = [];
-  for (let i = from; i < rot.slotCount; i++) if (rotSlotOf(rot, i)?.userId === userId) out.push(i);
-  return out;
-}
-
 // 等寬字體裡中文字佔兩格。不照這個算，整張行事曆的欄位會歪掉。
 function dispWidth(str) {
   let w = 0;

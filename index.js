@@ -757,22 +757,24 @@ async function generateJobEmbed(targetJob) {
   if (targetJob === 'WARDEN_LIST') {
     const wardens = members.filter(m => parseInt(m.mainLevel) >= 200);
     const desc = wardens.length
-      ? wardens.map((m, i) => `${i + 1}. 👑 \`${codeSafe(m.nickname || '')}[${codeSafe(m.mainLevel)}_${codeSafe(m.mainJob)}]\` - <@${m.userId}>${m.isRetired ? ' 🚪*已退休*' : ''}`).join('\n')
+      ? wardens.map((m, i) => `${i + 1}. 👑 \`${codeSafe(m.mainJob)}\` ${mdSafe(m.mainIgn)} — <@${m.userId}>${m.isRetired ? ' 🚪' : ''}`).join('\n')
       : '目前尚未誕生 Lv 200 典獄長！';
     return new EmbedBuilder().setColor(0xF1C40F).setTitle('👑【尊榮的 Lv 200_典獄長】傳奇名冊').setDescription(desc);
   }
 
   if (targetJob === 'ALL_JOBS_LIST') {
-    const embed = new EmbedBuilder().setColor(0x3498DB).setTitle('📋【全伺服器職業名冊總覽】');
+    const embed = new EmbedBuilder().setColor(0x3498DB).setTitle('📋【全伺服器職業名冊總覽】')
+      .setDescription('👑 本尊　‧　↳ 分身（箭頭後面是本尊名）　‧　🚪 已退休');
     let fCount = 0;
     for (const j of Object.keys(ROLES.JOBS)) {
       const charList = [];
       members.forEach(m => {
-        const retiredTag = m.isRetired ? ' 🚪*已退休*' : '';
-        const nickPrefix = codeSafe(m.nickname || '');
-        if (m.mainJob === j) charList.push({ text: `\`${nickPrefix}[${codeSafe(m.mainLevel)}_${codeSafe(m.mainJob)}]\`（${mdSafe(m.mainIgn)}）<@${m.userId}> **【本尊】**${retiredTag}`, lv: parseInt(m.mainLevel) || 0 });
+        const retiredTag = m.isRetired ? ' 🚪' : '';
+        // @標註本身就會顯示「暱稱[等級_職業]」，所以不再重複印一次前綴，
+        // 不然名字長一點就會被 Discord 折到第二行。
+        if (m.mainJob === j) charList.push({ text: `\`Lv.${codeSafe(m.mainLevel)}\` ${mdSafe(m.mainIgn)} — <@${m.userId}> 👑${retiredTag}`, lv: parseInt(m.mainLevel) || 0 });
         (m.subs || []).forEach(s => {
-          if (s?.job === j) charList.push({ text: `\`${nickPrefix}[${codeSafe(s.level)}_${codeSafe(s.job)}]\`（${mdSafe(s.ign)}）<@${m.userId}> *(本尊: ${mdSafe(m.mainIgn)})*${retiredTag}`, lv: parseInt(s.level) || 0 });
+          if (s?.job === j) charList.push({ text: `\`Lv.${codeSafe(s.level)}\` ${mdSafe(s.ign)} — <@${m.userId}> ↳${mdSafe(m.mainIgn)}${retiredTag}`, lv: parseInt(s.level) || 0 });
         });
       });
       if (charList.length && fCount < 24) {
@@ -786,11 +788,10 @@ async function generateJobEmbed(targetJob) {
 
   const list = [];
   members.forEach(m => {
-    const retiredTag = m.isRetired ? ' 🚪*已退休*' : '';
-    const nickPrefix = codeSafe(m.nickname || '');
-    if (m.mainJob === targetJob) list.push({ text: `\`${nickPrefix}[${codeSafe(m.mainLevel)}_${codeSafe(m.mainJob)}]\`（${mdSafe(m.mainIgn)}）- <@${m.userId}> **【本尊】**${retiredTag}`, lv: parseInt(m.mainLevel) || 0 });
+    const retiredTag = m.isRetired ? ' 🚪' : '';
+    if (m.mainJob === targetJob) list.push({ text: `\`Lv.${codeSafe(m.mainLevel)}\` ${mdSafe(m.mainIgn)} — <@${m.userId}> 👑${retiredTag}`, lv: parseInt(m.mainLevel) || 0 });
     (m.subs || []).forEach(s => {
-      if (s?.job === targetJob) list.push({ text: `\`${nickPrefix}[${codeSafe(s.level)}_${codeSafe(s.job)}]\`（${mdSafe(s.ign)}）- <@${m.userId}> [本尊: \`${codeSafe(m.mainIgn)}\`]${retiredTag}`, lv: parseInt(s.level) || 0 });
+      if (s?.job === targetJob) list.push({ text: `\`Lv.${codeSafe(s.level)}\` ${mdSafe(s.ign)} — <@${m.userId}> ↳${mdSafe(m.mainIgn)}${retiredTag}`, lv: parseInt(s.level) || 0 });
     });
   });
   list.sort((a, b) => b.lv - a.lv);
@@ -1056,11 +1057,13 @@ client.once(Events.ClientReady, async () => {
   cron.schedule('* * * * *', async () => {
     if (!db) return;
     try {
-      const snap = await db.collection('map_rotations').get();
+      // 一定要在查詢端過濾。撈整個集合的話，已結束的排班表每分鐘還是照算
+      // Firestore 讀取次數，幾個月後會燒穿免費額度，而失敗被 catch 吞掉，
+      // 所有排班提醒會靜默停擺。建表時一定寫入 isClosed，所以這個 where 安全。
+      const snap = await db.collection('map_rotations').where('isClosed', '==', false).get();
       const now = Date.now();
       for (const doc of snap.docs) {
         const rot = doc.data();
-        if (rot.isClosed) continue;
         const idx = rotCurrentIndex(rot, now);
 
         // ── 開打前 30 分鐘提醒 ──
@@ -1148,6 +1151,26 @@ client.once(Events.ClientReady, async () => {
         }).catch(() => {});
       }
     } catch (e) { console.error('熱門地圖排隊提醒異常:', e.message); }
+  }, { timezone: 'Asia/Taipei' });
+
+  // 每天清掉已結束超過 7 天的排班表。
+  // 不刪的話文件只增不減，而每分鐘的 cron 會一直撈，遲早燒穿 Firestore 免費額度。
+  cron.schedule('0 10 4 * * *', async () => {
+    if (!db) return;
+    try {
+      const snap = await db.collection('map_rotations').where('isClosed', '==', true).limit(300).get();
+      const cutoff = Date.now() - 7 * 86400000;
+      let removed = 0;
+      for (const doc of snap.docs) {
+        const rot = doc.data();
+        const endMs = (rot.startMs || 0) + (rot.slotCount || 0) * rotSlotLen(rot) * 60000;
+        if (endMs && endMs > cutoff) continue;
+        await doc.ref.delete().catch(() => {});
+        ROT_CACHE.delete(doc.id);
+        removed++;
+      }
+      if (removed) console.log(`🧹 已清理 ${removed} 張過期排班表`);
+    } catch (e) { console.error('清理排班表異常:', e.message); }
   }, { timezone: 'Asia/Taipei' });
 
   cron.schedule('0 0 9 * * 2', sendTuesdayBroadcast, { timezone: 'Asia/Taipei' });
@@ -1535,22 +1558,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const targetUser = interaction.options.getUser('對象成員');
           if (!targetUser) return interaction.reply({ content: '❌ 請選擇要代為登記的成員！', flags: MessageFlags.Ephemeral });
 
+          // 一定要把對方現有的資料帶進來。原本寫死空白，代填一次就把人家
+          // 既有的分身全部清掉，而且無法復原。
+          // 用 Fast 版本是因為接下來要 showModal，跳表單前不能超過 Discord 的 3 秒上限。
+          const prevProxy = (await fetchProfileFast(targetUser.id)).data;
           wizardSessionMap.set(interaction.user.id, {
             userId: interaction.user.id,
             targetUserId: targetUser.id,
             step: 'MAIN',
-            nickname: targetUser.username,
-            isRetired: false,
-            main: { ign: '', job: '黑騎士', level: '120' },
-            subs: [],
+            nickname: prevProxy.nickname || targetUser.username,
+            isRetired: !!prevProxy.isRetired,
+            main: {
+              ign: prevProxy.mainIgn || '',
+              job: prevProxy.mainJob || '黑騎士',
+              level: prevProxy.mainLevel || '120'
+            },
+            subs: dedupeSubs(prevProxy.subs, prevProxy.mainIgn),
             currentSub: null
           });
 
-          const modal = new ModalBuilder().setCustomId('modal_wizard_step1_main').setTitle(`代填【${targetUser.username}】本尊資料`);
+          const subCount = (prevProxy.subs || []).length;
+          const modal = new ModalBuilder().setCustomId('modal_wizard_step1_main')
+            .setTitle(`代填【${(prevProxy.nickname || targetUser.username).substring(0, 20)}】本尊資料`);
           modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_nickname').setLabel('本人綽號 / 稱呼 (必填)').setValue(targetUser.username).setStyle(TextInputStyle.Short).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_ign').setLabel('本尊遊戲 ID (必填)').setStyle(TextInputStyle.Short).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_level').setLabel('本尊等級 (必填)').setValue('120').setStyle(TextInputStyle.Short).setRequired(true))
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_nickname').setLabel('本人綽號 / 稱呼 (必填)').setValue(prevProxy.nickname || targetUser.username).setStyle(TextInputStyle.Short).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_ign').setLabel(subCount ? `本尊遊戲 ID (既有 ${subCount} 隻分身會保留)` : '本尊遊戲 ID (必填)').setValue(prevProxy.mainIgn || '').setStyle(TextInputStyle.Short).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wiz_main_level').setLabel('本尊等級 (必填)').setValue(prevProxy.mainLevel || '120').setStyle(TextInputStyle.Short).setRequired(true))
           );
           return await interaction.showModal(modal);
         }
@@ -1623,14 +1656,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (customId === 'wiz_btn_retire') {
         const session = wizardSessionMap.get(interaction.user.id);
-        if (!session) return interaction.reply({ content: '❌ 報到已逾時，請重新點擊報到！', flags: MessageFlags.Ephemeral });
+        if (!session) return interaction.reply({ content: '❌ 報到流程已中斷（機器人可能剛重啟），請重新點一次報到。', flags: MessageFlags.Ephemeral });
         session.isRetired = !session.isRetired;
         return await interaction.update(buildWizardConfigCard(interaction.user.id));
       }
 
       if (customId === 'wiz_btn_add_sub') {
         const session = wizardSessionMap.get(interaction.user.id);
-        if (!session) return interaction.reply({ content: '❌ 報到已逾時，請重新點擊報到！', flags: MessageFlags.Ephemeral });
+        if (!session) return interaction.reply({ content: '❌ 報到流程已中斷（機器人可能剛重啟），請重新點一次報到。', flags: MessageFlags.Ephemeral });
 
         if (session.step === 'SUB' && session.currentSub && session.currentSub.ign) {
           session.subs.push(session.currentSub);
@@ -1647,7 +1680,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (customId === 'wiz_btn_finish') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const session = wizardSessionMap.get(interaction.user.id);
-        if (!session) return interaction.editReply('❌ 報到已逾時，請重新點擊報到！');
+        if (!session) return interaction.editReply('❌ 報到流程已中斷（機器人可能剛重啟），請重新點一次報到。');
 
         if (session.step === 'SUB' && session.currentSub && session.currentSub.ign) {
           session.subs.push(session.currentSub);
@@ -1666,6 +1699,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         if (db) {
           invalidateProfile(targetUid);
+          // 一定要 merge：不加的話整份文件被換掉，payload 沒列到的欄位全部蒸發
+          // （raid 突襲進度、reach199At 199 倒數起算時間）。而週二廣播每週叫大家
+          // 重新報到，等於每週幫全公會把進度歸零。
           await db.collection('member_profiles').doc(targetUid).set({
             userId: targetUid,
             nickname,
@@ -1673,7 +1709,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             subs: validSubs,
             isRetired: !!session.isRetired,
             timestamp: admin.firestore.FieldValue.serverTimestamp()
-          });
+          }, { merge: true });
 
         }
 
@@ -2726,11 +2762,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
         }
 
-        // 團練時一格有多人：本人只退自己，開表者／管理員代取消才整格清空
-        const slot = occupants[0];
+        // 團練時一格有多人：本人只退自己，開表者／管理員代取消才整格清空。
+        // 只寫自己那一格（dot path），整塊 slots 覆寫會把別人剛搶到的格子抹掉。
+        // colors 保留不動，之後再排回來還是同一個顏色。
         const remain = isOwner ? occupants.filter(u => u.userId !== interaction.user.id) : [];
         const slots = rotSetSlot(rot.slots, idx, remain);
-        await ref.update({ slots });   // colors 保留不動，之後再排回來還是同一個顏色
+        await ref.update(remain.length
+          ? { [`slots.${idx}`]: { users: remain } }
+          : { [`slots.${idx}`]: admin.firestore.FieldValue.delete() });
 
         const merged = { ...rot, slots };
         cacheRot(rotId, merged);
@@ -2790,9 +2829,42 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const ign = prof.mainIgn || interaction.member?.displayName || interaction.user.username;
         const me = { userId: interaction.user.id, ign };
         if (asSupport) me.support = true;            // 外援不分攤費用
-        const slots = rotSetSlot(rot.slots, idx, [...current, me]);
         const colors = rotAssignColor(rot, interaction.user.id);
-        await ref.update({ slots, colors });
+
+        // 用交易重讀再寫，而且只動自己那一格（dot path）。
+        // 整塊 slots 覆寫的話，連「兩個人搶不同格」都會互相抹掉。
+        let slots;
+        try {
+          slots = await db.runTransaction(async (tx) => {
+            const snap = await tx.get(ref);
+            if (!snap.exists) throw new Error('GONE');
+            const live = snap.data();
+            if (live.isClosed) throw new Error('CLOSED');
+            const nowUsers = rotSlotUsers(live, idx);
+            if (nowUsers.some(u => u.userId === interaction.user.id)) throw new Error('DUP');
+            if (nowUsers.length && !live.allowShare) throw new Error('TAKEN');
+            if (nowUsers.length >= ROT_MAX_PER_SLOT) throw new Error('FULL');
+            const users = [...nowUsers, me];
+            tx.update(snap.ref, {
+              [`slots.${idx}`]: { users },
+              [`colors.${interaction.user.id}`]: colors[interaction.user.id]
+            });
+            return rotSetSlot(live.slots, idx, users);
+          });
+        } catch (e) {
+          const msg = {
+            GONE: '❌ 這張排班表已經不存在了。',
+            CLOSED: '🚪 這張排班表已經結束了。',
+            DUP: '💡 你已經在這個時段了。',
+            TAKEN: `😅 慢了一步，${rotSlotLabel(rot, idx)} 剛剛被別人接走了。請按 🔄 即時更新。`,
+            FULL: `😅 ${rotSlotLabel(rot, idx)} 人滿了。`
+          }[e.message];
+          if (!msg) console.error('認領時段交易失敗:', e.message);
+          return await interaction.followUp({
+            content: msg || '⏳ 這次沒寫進去（可能同時有人在搶），請再按一次。',
+            flags: MessageFlags.Ephemeral
+          });
+        }
 
         const merged = { ...rot, slots, colors };
         cacheRot(rotId, merged);
@@ -2872,7 +2944,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       // 4. 報到精靈職業與擁有者
       if (customId === 'wiz_select_job') {
         const session = wizardSessionMap.get(interaction.user.id);
-        if (!session) return interaction.reply({ content: '❌ 報到已逾時，請重新點擊報到！', flags: MessageFlags.Ephemeral });
+        if (!session) return interaction.reply({ content: '❌ 報到流程已中斷（機器人可能剛重啟），請重新點一次報到。', flags: MessageFlags.Ephemeral });
         const selectedJob = interaction.values[0];
         if (session.step === 'MAIN') session.main.job = selectedJob;
         else if (session.currentSub) session.currentSub.job = selectedJob;
@@ -3307,7 +3379,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (customId === 'modal_wizard_step_sub') {
         const session = wizardSessionMap.get(interaction.user.id);
-        if (!session) return interaction.reply({ content: '❌ 報到已逾時，請重新登記！', flags: MessageFlags.Ephemeral });
+        if (!session) return interaction.reply({ content: '❌ 報到流程已中斷（機器人可能剛重啟），請重新點一次報到。', flags: MessageFlags.Ephemeral });
 
         const ign = interaction.fields.getTextInputValue('wiz_sub_ign').trim();
         const level = clampLevel(interaction.fields.getTextInputValue('wiz_sub_level'), '120');
@@ -3334,16 +3406,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const buffs = parseBuffInput(rawBuffs);
 
-        const members = (pData.members || []).filter(m => !(m.userId === interaction.user.id && m.ign.toLowerCase() === ign.toLowerCase()));
-        members.push({ userId: interaction.user.id, ign, job, level: lv, buffs });
-
-        const currentCount = members.length;
-        if (currentCount > pData.maxCount) {
-          return interaction.editReply('❌ 報名失敗：此隊伍達上限');
+        // 用交易重讀人數再寫。拿舊快照檢查的話，兩個人同時送出會雙雙通過，
+        // 6 人團變成 7 人，而且其中一筆報名會被另一筆整塊覆寫掉。
+        let members;
+        try {
+          members = await db.runTransaction(async (tx) => {
+            const ref = db.collection('party_trainings').doc(pId);
+            const snap = await tx.get(ref);
+            if (!snap.exists) throw new Error('GONE');
+            const live = snap.data();
+            if (live.isClosed) throw new Error('CLOSED');
+            const next = (live.members || [])
+              .filter(m => !(m.userId === interaction.user.id && (m.ign || '').toLowerCase() === ign.toLowerCase()));
+            next.push({ userId: interaction.user.id, ign, job, level: lv, buffs });
+            if (next.length > live.maxCount) throw new Error('FULL');
+            tx.update(ref, { members: next });
+            return next;
+          });
+        } catch (e) {
+          if (e.message === 'GONE') return interaction.editReply('❌ 揪團不存在。');
+          if (e.message === 'CLOSED') return interaction.editReply('🔒 此揪團已關閉招募！');
+          if (e.message === 'FULL') return interaction.editReply('❌ 報名失敗：此隊伍剛剛滿了。');
+          console.error('報名交易失敗:', e.message);
+          return interaction.editReply('⏳ 這次沒寫進去（可能同時有人在報名），請再按一次。');
         }
-        const isFull = currentCount >= pData.maxCount;
-
-        await db.collection('party_trainings').doc(pId).update({ members });
+        const isFull = members.length >= pData.maxCount;
         await refreshPartyMessage(pId, { ...pData, members }, isFull, interaction);
         return await interaction.editReply(`🎉 成功報名加入揪團！角色：\`${ign}\``);
       }
@@ -3409,16 +3496,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const buffs = parseBuffInput(rawBuffs);
 
-        const members = (pData.members || []).filter(m => !(m.userId === interaction.user.id && m.ign.toLowerCase() === ign.toLowerCase()));
-        members.push({ userId: interaction.user.id, ign, job, level: lv, buffs });
-
-        const currentCount = members.length;
-        if (currentCount > pData.maxCount) {
-          return interaction.editReply('❌ 報名失敗：此隊伍達上限');
+        // 用交易重讀人數再寫。拿舊快照檢查的話，兩個人同時送出會雙雙通過，
+        // 6 人團變成 7 人，而且其中一筆報名會被另一筆整塊覆寫掉。
+        let members;
+        try {
+          members = await db.runTransaction(async (tx) => {
+            const ref = db.collection('party_trainings').doc(pId);
+            const snap = await tx.get(ref);
+            if (!snap.exists) throw new Error('GONE');
+            const live = snap.data();
+            if (live.isClosed) throw new Error('CLOSED');
+            const next = (live.members || [])
+              .filter(m => !(m.userId === interaction.user.id && (m.ign || '').toLowerCase() === ign.toLowerCase()));
+            next.push({ userId: interaction.user.id, ign, job, level: lv, buffs });
+            if (next.length > live.maxCount) throw new Error('FULL');
+            tx.update(ref, { members: next });
+            return next;
+          });
+        } catch (e) {
+          if (e.message === 'GONE') return interaction.editReply('❌ 揪團不存在。');
+          if (e.message === 'CLOSED') return interaction.editReply('🔒 此揪團已關閉招募！');
+          if (e.message === 'FULL') return interaction.editReply('❌ 報名失敗：此隊伍剛剛滿了。');
+          console.error('報名交易失敗:', e.message);
+          return interaction.editReply('⏳ 這次沒寫進去（可能同時有人在報名），請再按一次。');
         }
-        const isFull = currentCount >= pData.maxCount;
-
-        await db.collection('party_trainings').doc(pId).update({ members });
+        const isFull = members.length >= pData.maxCount;
         await refreshPartyMessage(pId, { ...pData, members }, isFull, interaction);
         return await interaction.editReply(`🎉 成功報名加入揪團！角色：\`${ign}\``);
       }
@@ -3474,10 +3576,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const prev = await fetchUserDocSafe(interaction.user.id);
         const ign = prev.nickname || prev.mainIgn || interaction.user.displayName;
 
+        // 只寫自己那一格（dot path），不要整塊 pityDonations 覆寫，
+        // 否則兩人同時抖內會吃掉一筆，但播報已經喊出去了。
         d.pityDonations = d.pityDonations || {};
         const newTotal = (d.pityDonations[interaction.user.id]?.amount || 0) + amt;
         d.pityDonations[interaction.user.id] = { ign, amount: newTotal };
-        await db.collection('active_bets').doc(bId).update({ pityDonations: d.pityDonations });
+        await db.collection('active_bets').doc(bId)
+          .update({ [`pityDonations.${interaction.user.id}`]: { ign, amount: newTotal } });
 
         // 公開播報（原本是私密，改為公開讓大家看到善舉）
         if (d.channelId) {
@@ -3961,12 +4066,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const prev = await fetchUserDocSafe(interaction.user.id);
         const ign = prev.nickname || prev.mainIgn || interaction.user.displayName;
-        const cur = d.options[optIdx].bets[interaction.user.id]?.amount || 0;
-        d.options[optIdx].bets[interaction.user.id] = { ign, amount: cur + amt };
-        d.options[optIdx].pool = (d.options[optIdx].pool || 0) + amt;
 
-        await db.collection('active_bets').doc(bId).update({ options: d.options });
-        await refreshBetMessage(bId, d, interaction);
+        // 用交易重讀再寫，不然兩個人同時下注時後寫的會把整個 options 蓋掉，
+        // 先下注那位的錢會無聲消失（他已經收到「已下注」）。
+        let fresh;
+        try {
+          fresh = await db.runTransaction(async (tx) => {
+            const snap = await tx.get(db.collection('active_bets').doc(bId));
+            if (!snap.exists) throw new Error('GONE');
+            const cur = snap.data();
+            if (cur.isSettled) throw new Error('SETTLED');
+            if (Date.now() >= cur.deadline) throw new Error('EXPIRED');
+            const opts = cur.options;
+            if (!opts[optIdx]) throw new Error('BADOPT');
+            opts[optIdx].bets = opts[optIdx].bets || {};
+            const had = opts[optIdx].bets[interaction.user.id]?.amount || 0;
+            opts[optIdx].bets[interaction.user.id] = { ign, amount: had + amt };
+            opts[optIdx].pool = (opts[optIdx].pool || 0) + amt;
+            tx.update(snap.ref, { options: opts });
+            return { ...cur, options: opts };
+          });
+        } catch (e) {
+          if (e.message === 'GONE') return interaction.editReply('❌ 賭局已失效。');
+          if (e.message === 'SETTLED') return interaction.editReply('🛑 該賭局已結算完畢！');
+          if (e.message === 'EXPIRED') return interaction.editReply('🛑 該賭局已截止下注！');
+          if (e.message === 'BADOPT') return interaction.editReply('❌ 選項無效。');
+          console.error('下注交易失敗:', e.message);
+          return interaction.editReply('⏳ 這次沒寫進去（可能同時有人在下注），請再按一次。');
+        }
+        await refreshBetMessage(bId, fresh, interaction);
 
         return await interaction.editReply(
           `✅ 已為 **${d.options[optIdx].name}** 下注 \`${formatMeso(amt)} 楓幣\`！（你在這個選項累計 ${formatMeso(cur + amt)}）`

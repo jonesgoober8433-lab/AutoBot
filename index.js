@@ -2287,12 +2287,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           new ActionRowBuilder().addComponents(
             new TextInputBuilder().setCustomId('rot_e_split').setLabel('分攤方式：均攤 或 時間')
               .setValue(rotSplitLabel(rot.splitMode)).setStyle(TextInputStyle.Short).setRequired(false)
-          ),
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('rot_e_payer').setLabel('墊付／收款的人（貼 @標註或 ID）')
-              .setValue(rotPayerId(rot) || '')
-              .setPlaceholder('留空＝不變。團練開關請用面板上的 🤝 按鈕')
-              .setStyle(TextInputStyle.Short).setRequired(false)
           )
         );
         return await interaction.showModal(modal);
@@ -2350,12 +2344,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!rotCanProxy(rot, interaction)) {
           return await interaction.editReply('❌ 只有開表的人、墊付人、管理員，或是這張表裡有排班的人才能幫別人登記。');
         }
+        const rows = [new ActionRowBuilder().addComponents(
+          new UserSelectMenuBuilder().setCustomId(`rot_proxy_user_${rotId}`)
+            .setPlaceholder('👥 幫誰登記時段（可補登過去的）').setMinValues(1).setMaxValues(1)
+        )];
+        // 換墊付人只給開表者、現任墊付人與管理員
+        const canPay = interaction.user.id === rot.creatorId
+          || interaction.user.id === rotPayerId(rot)
+          || isSuperAdmin(interaction.user.id, interaction.memberPermissions);
+        if (canPay) {
+          rows.push(new ActionRowBuilder().addComponents(
+            new UserSelectMenuBuilder().setCustomId(`rot_payer_user_${rotId}`)
+              .setPlaceholder('💰 換墊付／收款的人').setMinValues(1).setMaxValues(1)
+          ));
+        }
         return await interaction.editReply({
-          content: '👥 **幫別人登記**：先選要幫誰登記。\n*會記錄是你代按的，並顯示在面板上。*',
-          components: [new ActionRowBuilder().addComponents(
-            new UserSelectMenuBuilder().setCustomId(`rot_proxy_user_${rotId}`)
-              .setPlaceholder('選擇要幫誰登記').setMinValues(1).setMaxValues(1)
-          )]
+          content: '👥 **代登記**：選人之後再選時段，會記錄是你代按的並顯示在面板上。'
+            + (canPay ? `\n💰 **墊付／收款人**目前是 <@${rotPayerId(rot)}>，要換的話用下面那個選單。` : ''),
+          components: rows
         });
       }
 
@@ -2811,6 +2817,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
+      // 換墊付／收款人
+      if (customId.startsWith('rot_payer_user_')) {
+        await interaction.deferUpdate();
+        const rotId = customId.replace('rot_payer_user_', '');
+        const ref = db.collection('map_rotations').doc(rotId);
+        const doc = await ref.get().catch(() => null);
+        if (!doc?.exists) return await interaction.editReply({ content: '❌ 這張排班表已經不存在了。', components: [] });
+        const rot = doc.data();
+        if (interaction.user.id !== rot.creatorId && interaction.user.id !== rotPayerId(rot)
+          && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return await interaction.editReply({ content: '❌ 只有開表的人、現任墊付人或管理員可以換。', components: [] });
+        }
+        const payerId = interaction.values[0];
+        const before = rotPayerId(rot);
+        if (payerId === before) return await interaction.editReply({ content: '💡 本來就是這個人，沒有變動。', components: [] });
+
+        await ref.update({ payerId });
+        const merged = { ...rot, payerId };
+        cacheRot(rotId, merged);
+        await refreshRotationMessage(rotId, merged, interaction);
+        try {
+          const ch = interaction.channel;
+          if (ch?.isTextBased()) {
+            await ch.send(`💰 **【墊付人變更】${rot.mapName}**　<@${before}> ➔ <@${payerId}>\n結算時大家會把錢匯給 <@${payerId}>。`);
+          }
+        } catch { /* 沒發言權限就算了 */ }
+        return await interaction.editReply({ content: `✅ 墊付／收款人已改成 <@${payerId}>，並公告到頻道。`, components: [] });
+      }
+
       // 代登記第三步：寫入，並記下是誰代按的、什麼時候按的
       if (customId.startsWith('rot_proxyslot_')) {
         await interaction.deferUpdate();
@@ -2872,18 +2907,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return await interaction.followUp({ content: '❌ 你沒有代登記的權限。', flags: MessageFlags.Ephemeral });
         }
         const targetUid = interaction.values[0];
-        const pick = rotPickableIndexes(rot, targetUid).slice(0, ROT_PICK_LIMIT);
+        // 連已經過去的時段也列出來，才能補登「打完但忘了按」的班
+        const curIdx = rotCurrentIndex(rot);
+        const all = rotPickableIndexes(rot, targetUid, Date.now(), true);
+        // 以「現在」為中心取樣：往前最多 8 格、其餘留給未來，免得被過去的塞滿 25 個名額
+        const past = all.filter(p => p.idx < curIdx).slice(-8);
+        const future = all.filter(p => p.idx >= curIdx).slice(0, ROT_PICK_LIMIT - past.length);
+        const pick = [...past, ...future];
         if (!pick.length) {
-          return await interaction.editReply({ content: `💡 <@${targetUid}> 目前沒有可以登記的時段（都滿了或都排過了）。`, components: [] });
+          return await interaction.editReply({ content: `💡 <@${targetUid}> 沒有可以登記的時段（都滿了或都排過了）。`, components: [] });
         }
         return await interaction.editReply({
-          content: `👥 要幫 <@${targetUid}> 登記哪一段？`,
+          content: `👥 要幫 <@${targetUid}> 登記哪一段？\n*⏪ 開頭的是已經過去的時段，可以補登。*`,
           components: [new ActionRowBuilder().addComponents(
             new StringSelectMenuBuilder().setCustomId(`rot_proxyslot_${rotId}_${targetUid}`)
-              .setPlaceholder('選一個時段')
+              .setPlaceholder('選一個時段（含可補登的過去時段）')
               .addOptions(pick.map(p => new StringSelectMenuOptionBuilder()
-                .setLabel((p.n ? `${rotSlotLabel(rot, p.idx)}　🤝 併團(${p.n}人)` : rotSlotLabel(rot, p.idx)).slice(0, 100))
-                .setDescription(rotDayLabel(rotSlotMs(rot, p.idx)).slice(0, 100))
+                .setLabel(`${p.idx < curIdx ? '⏪ ' : ''}${rotSlotLabel(rot, p.idx)}${p.n ? `　🤝 併團(${p.n}人)` : ''}`.slice(0, 100))
+                .setDescription(`${rotDayLabel(rotSlotMs(rot, p.idx))}${p.idx < curIdx ? '　（補登）' : ''}`.slice(0, 100))
                 .setValue(String(p.idx))))
           )]
         });
@@ -3954,17 +3995,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         if (splitMode !== rot.splitMode) changes.push(`分攤方式：${rotSplitLabel(rot.splitMode)} ➔ ${rotSplitLabel(splitMode)}`);
 
-        // 墊付人可以換：貼 @標註或純數字 ID 都收
-        const payerRaw = (interaction.fields.getTextInputValue('rot_e_payer') || '').trim();
-        const payerMatch = payerRaw.match(/(\d{5,25})/);
-        const payerId = payerMatch ? payerMatch[1] : rotPayerId(rot);
-        if (payerRaw && !payerMatch) return interaction.editReply('❌ 看不懂墊付人。請貼 @標註，或直接貼對方的 Discord ID（一串數字）。');
-        if (payerId !== rotPayerId(rot)) changes.push(`墊付／收款人：<@${rotPayerId(rot)}> ➔ <@${payerId}>`);
-
         if (!changes.length) return interaction.editReply('💡 沒有任何變動。');
 
-        await ref.update({ mapName, note, buyPrice, splitMode, payerId });
-        const merged = { ...rot, mapName, note, buyPrice, splitMode, payerId };
+        await ref.update({ mapName, note, buyPrice, splitMode });
+        const merged = { ...rot, mapName, note, buyPrice, splitMode };
         cacheRot(rotId, merged);
         await refreshRotationMessage(rotId, merged, interaction);
         return interaction.editReply(`✅ 已更新：\n${changes.map(c => `‧ ${c}`).join('\n')}`);
@@ -4808,7 +4842,8 @@ const ROT_MAX_PER_SLOT = 5;         // 團練時同一格最多幾個人
 const ROT_BACKFILL_MS = 12 * 3600000;   // 只填 HH:mm 時，往前 12 小時內都算今天
 const ROT_SLOT_MIN = 30;            // 一格固定 30 分鐘（不開放自訂）
 const ROT_DESC_BUDGET = 3200;       // 留給表格的字數，其餘讓給標題、狀態列與圖例
-const ROT_MAX_DAYS = 3;             // 48 小時最多橫跨 3 個日曆天
+const ROT_COL_HOURS = 12;           // 行事曆一欄涵蓋幾小時
+const ROT_MAX_COLS = 4;             // 最多幾欄（12 小時 × 4 = 48 小時）
 const ROT_PICK_LIMIT = 25;          // Discord 下拉選單硬上限
 const ROT_PRE_NOTIFY_MS = 30 * 60000;   // 輪到自己前 30 分鐘提醒一次
 const ROT_COLORS = [31, 32, 33, 34, 35, 36];   // ANSI 前景色：紅 綠 黃 藍 洋紅 青
@@ -4879,12 +4914,6 @@ function rotChanLabel(rot) {
   return rot?.channelNum > 0 ? `第 ${rot.channelNum} 頻道` : '頻道未定';
 }
 function rotSlotMs(rot, idx) { return rot.startMs + idx * rotSlotLen(rot) * 60000; }
-// 起始時間不一定落在整點（例如 08:45 開始），行事曆的橫列要跟著位移，
-// 否則格子算出來的索引會是小數，整張表就空了。
-function rotDayOffsetMs(rot) {
-  const slotMs = rotSlotLen(rot) * 60000;
-  return ((rot.startMs - tpeMidnight(rot.startMs)) % slotMs + slotMs) % slotMs;
-}
 function rotCurrentIndex(rot, nowMs = Date.now()) {
   return Math.floor((nowMs - rot.startMs) / (rotSlotLen(rot) * 60000));
 }
@@ -4939,8 +4968,9 @@ function rotEmptyIndexes(rot, nowMs = Date.now()) {
 }
 
 // 可以登記的格子：空的都能排；開了團練的話，未滿的格子也能併進去
-function rotPickableIndexes(rot, userId, nowMs = Date.now()) {
-  const from = Math.max(0, rotCurrentIndex(rot, nowMs));
+function rotPickableIndexes(rot, userId, nowMs = Date.now(), includePast = false) {
+  // includePast：補登「已經打完但沒登記」的時段用的
+  const from = includePast ? 0 : Math.max(0, rotCurrentIndex(rot, nowMs));
   const out = [];
   for (let i = from; i < rot.slotCount; i++) {
     const users = rotSlotUsers(rot, i);
@@ -4972,68 +5002,64 @@ function rotTag(ign) {
   if (!chars.length) return '??';
   return dispWidth(chars[0]) === 2 ? chars[0] : padCell(chars.slice(0, 2).join(''), 2);
 }
-function tpeMidnight(ms) {
-  const t = tpeToday(ms);
-  return tpeWallClockToMs(t.year, t.month, t.day, 0, 0);
-}
 
 // 把排班表畫成行事曆：直欄是日期、橫列是時段，格子用顏色區分是誰。
 // 預設把每一列都畫出來；只有在內容會撐破 embed 的 4096 字上限時才退讓。
 function rotRenderGrid(rot, nowMs = Date.now()) {
   const slotMs = rotSlotLen(rot) * 60000;
-  const rowsPerDay = Math.round(1440 / rotSlotLen(rot));
-  const endMs = rot.startMs + rot.slotCount * slotMs;
   const colors = rotColorMap(rot);
   const curIdx = rotCurrentIndex(rot, nowMs);
 
-  const days = [];
-  for (let d = tpeMidnight(rot.startMs); d < endMs; d += 86400000) days.push(d);
-  const hiddenDays = Math.max(0, days.length - ROT_MAX_DAYS);
-  if (hiddenDays) days.length = ROT_MAX_DAYS;
+  // 一欄 12 小時。一天 24 小時擠成一欄的話，半小時一格就是 48 列，太長。
+  // 每一欄自己帶時間，所以不會有「左邊時間欄只對第一欄成立」的誤讀問題。
+  const perCol = Math.max(1, Math.round(ROT_COL_HOURS * 60 / rotSlotLen(rot)));
+  const colCount = Math.min(ROT_MAX_COLS, Math.ceil(rot.slotCount / perCol));
+  const hiddenSlots = Math.max(0, rot.slotCount - colCount * perCol);
 
-  const TIME_W = 7, CELL_W = 6;
-  let head = padCell('', TIME_W), head2 = padCell('', TIME_W);
-  days.forEach(d => {
-    const [date, wk] = rotDayLabel(d).split(' ');
-    head += padCell(date, CELL_W);
-    head2 += padCell(wk || '', CELL_W);
-  });
-
-  const offset = rotDayOffsetMs(rot);
-  const rows = [];
-  for (let r = 0; r < rowsPerDay; r++) {
-    const cells = days.map(d => {
-      const idx = Math.round((d + offset + r * slotMs - rot.startMs) / slotMs);
-      if (idx < 0 || idx >= rot.slotCount) return { kind: 'out' };
-      const users = rotSlotUsers(rot, idx);
-      if (!users.length) return { kind: 'free', idx, now: idx === curIdx };
-      const payers = users.filter(u => !u.support);
-      return {
-        kind: 'busy', idx, s: payers[0] || users[0], n: users.length,
-        allSupport: payers.length === 0,
-        past: idx < curIdx, now: idx === curIdx
-      };
-    });
-    rows.push({ r, time: rotTimeLabel(tpeMidnight(rot.startMs) + offset + r * slotMs), cells });
+  const CELL_W = 13;   // "20:00 ██阿   " 的寬度
+  let head = '';
+  for (let b = 0; b < colCount; b++) {
+    // 資料列每格前面有一個字元放 ▶，表頭要跟著空一格才對得齊
+    head += ' ' + padCell(rotDayLabel(rotSlotMs(rot, b * perCol)), CELL_W);
   }
 
-  // 同一列若連續幾格顏色相同，色碼只送一次 —— ANSI escape 也算進 4096 字裡，
-  // 一格一組色碼的話 15 分鐘切法直接爆掉。
+  const rows = [];
+  for (let r = 0; r < perCol; r++) {
+    const cells = [];
+    for (let b = 0; b < colCount; b++) {
+      const idx = b * perCol + r;
+      if (idx >= rot.slotCount) { cells.push({ kind: 'out' }); continue; }
+      const users = rotSlotUsers(rot, idx);
+      const time = rotTimeLabel(rotSlotMs(rot, idx));
+      if (!users.length) { cells.push({ kind: 'free', idx, time, now: idx === curIdx }); continue; }
+      const payers = users.filter(u => !u.support);
+      cells.push({
+        kind: 'busy', idx, time, s: payers[0] || users[0], n: users.length,
+        allSupport: payers.length === 0,
+        past: idx < curIdx, now: idx === curIdx
+      });
+    }
+    rows.push({ r, cells });
+  }
+
+  // 同一列若連續幾格顏色相同，色碼只送一次 —— ANSI escape 也算進 4096 字裡。
   const renderRow = (row) => {
-    let line = (row.cells.some(c => c.now) ? '\u001b[1;37m▶\u001b[0m' : ' ') + padCell(row.time, TIME_W - 1);
+    let line = '';
     let cur = null;
     row.cells.forEach(c => {
       let col, text;
-      if (c.kind === 'out') { col = 30; text = padCell('·', CELL_W); }
-      else if (c.kind === 'free') { col = 30; text = padCell('░░', CELL_W); }
+      if (c.kind === 'out') { col = 30; text = padCell('', CELL_W); }
+      else if (c.kind === 'free') { col = 30; text = padCell(`${c.time} ░░`, CELL_W); }
       else {
         col = c.past ? 30 : (colors.get(c.s.userId) || 37);
         // 團練的格子標 +N；整格都是外援就標 🆘，一眼看出這段不用收錢
-        text = padCell(
-          c.allSupport ? '██🆘' : (c.n > 1 ? `██+${c.n}` : '██' + rotTag(c.s.ign)),
-          CELL_W
-        );
+        const block = c.allSupport ? '██🆘' : (c.n > 1 ? `██+${c.n}` : '██' + rotTag(c.s.ign));
+        text = padCell(`${c.time} ${block}`, CELL_W);
       }
+      // ▶ 標在時間前面，標記的是「現在」那一格
+      if (c.now) { line += '\u001b[0m\u001b[1;37m▶\u001b[0m'; cur = null; }
+      else if (c.kind !== 'out') line += ' ';
+      else { line += ' '; }
       if (col !== cur) { line += `\u001b[${col}m`; cur = col; }
       line += text;
     });
@@ -5044,7 +5070,6 @@ function rotRenderGrid(rot, nowMs = Date.now()) {
 
   const render = (collapse, maxRows) => {
     let t = '```ansi\n' + `\u001b[1;30m${head}\u001b[0m\n`;
-    if (head2.trim()) t += `\u001b[30m${head2}\u001b[0m\n`;
     let i = 0, lines = 0, skipped = 0;
     while (i < rows.length) {
       if (lines >= maxRows) { skipped += rows.length - i; break; }
@@ -5060,7 +5085,7 @@ function rotRenderGrid(rot, nowMs = Date.now()) {
     }
     t += '```';
     if (skipped) t += `\n*…還有 ${skipped} 列放不下，用下拉選單一樣排得到*`;
-    if (hiddenDays) t += `\n*…後面還有 ${hiddenDays} 天沒畫出來*`;
+    if (hiddenSlots) t += `\n*…後面還有 ${hiddenSlots} 格沒畫出來，用下拉選單一樣排得到*`;
     return t;
   };
 
@@ -5405,7 +5430,7 @@ function buildRotationComponents(rotId, rot, nowMs = Date.now()) {
       new ButtonBuilder().setCustomId(`rot_share_toggle_${rotId}`)
         .setLabel(rot.allowShare ? '🤝 團練：開' : '🤝 團練：關')
         .setStyle(rot.allowShare ? ButtonStyle.Success : ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`rot_proxy_${rotId}`).setLabel('👥 幫別人登記').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`rot_proxy_${rotId}`).setLabel('👥 代登記／墊付人').setStyle(ButtonStyle.Primary),
       // 有收費的團按下去要先跳表單問賣價，而跳表單前不能 defer，
       // 所以用兩種 customId 讓處理器在「還沒讀資料庫」前就知道要走哪條路。
       rot.buyPrice > 0

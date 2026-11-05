@@ -484,6 +484,54 @@ async function getActiveBetDoc() {
   } catch { return null; }
 }
 
+// 伺服器暱稱的固定格式：綽號[等級_職業]，上限 32 字是 Discord 的硬限制
+function rosterNickname(profile) {
+  const nick = String(profile?.nickname || '').trim();
+  const lv = String(profile?.mainLevel || '').trim();
+  const job = String(profile?.mainJob || '').trim();
+  if (!nick && !lv && !job) return '';
+  return `${nick}[${lv}_${job}]`.substring(0, 32);
+}
+
+// 改暱稱很常失敗，而 Discord 只會回一句「Missing Permissions」，查不出是哪一種。
+// 所以動手前自己先判斷，把原因翻成可以照做的白話。
+// 以前這裡是 .catch(() => {})，失敗完全無聲，使用者還會收到「暱稱已同步更新」。
+async function applyNickname(guild, userId, nick) {
+  const name = String(nick || '').trim().substring(0, 32);
+  if (!guild) return { ok: false, reason: '讀不到伺服器資料' };
+  if (!name) return { ok: false, reason: '算出來的暱稱是空的（綽號、等級、職業都沒填）' };
+
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return { ok: false, reason: '這個人已經不在伺服器裡' };
+  if (member.nickname === name) return { ok: true, skipped: true, name };
+
+  const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
+  if (!me) return { ok: false, reason: '讀不到機器人自己的成員資料' };
+  if (!me.permissions.has(PermissionFlagsBits.ManageNicknames)) {
+    return { ok: false, reason: '機器人沒有「管理暱稱」權限（伺服器設定 → 身分組 → 機器人的身分組 → 打開「管理暱稱」）' };
+  }
+  if (userId === guild.ownerId) {
+    return { ok: false, owner: true, reason: '對方是伺服器擁有者 —— Discord 規定任何機器人都改不了擁有者的暱稱，這個無解，只能請他自己改' };
+  }
+  if (!member.manageable) {
+    const top = member.roles.highest;
+    const mine = me.roles.highest;
+    return {
+      ok: false, hierarchy: true,
+      reason: `機器人的身分組「${mine?.name || '?'}」排在對方的「${top?.name || '最高身分組'}」下面，改不動。`
+        + `請到 伺服器設定 → 身分組，把機器人的身分組拖到「${top?.name || '那個身分組'}」上面`
+    };
+  }
+
+  try {
+    await member.setNickname(name);
+    return { ok: true, name };
+  } catch (e) {
+    console.error(`改暱稱失敗（${userId} ➔ ${name}）:`, e?.message || e);
+    return { ok: false, reason: `Discord 回報：${e?.message || '不明錯誤'}` };
+  }
+}
+
 async function syncMemberRoles(guild, userId, profileData) {
   try {
     const member = await guild.members.fetch(userId).catch(() => null);
@@ -533,19 +581,29 @@ function buildRegisterPanelEmbed() {
     .setColor(0x57F287)
     .setTitle('📝【冒險家名冊登記 / 更新中心】')
     .setDescription(
-      `歡迎加入冒險公會！\n` +
-      `點擊下方按鈕即可填寫您的 **本人綽號**、**本尊角色** 與 **多隻分身小號**。\n\n` +
+      `歡迎加入冒險公會！這裡是**名冊自助中心** —— 下面每一顆按鈕都只會動到**你自己**的資料。\n\n` +
+      `📝 **報到 / 更新名冊** —— 第一次來、或要加分身小號\n` +
+      `🪪 **我的名片** —— 看自己的資料，裡面還能管分身、看突襲進度\n` +
+      `🆙 **更新等級** —— 升級了就來按，所有角色一次改完\n` +
+      `✏️ **改角色名** —— 遊戲裡改名後同步過來，職業與等級不會變\n\n` +
       `✨ **機器人自動執行**：\n` +
       `• 自動將伺服器暱稱更新為 \`綽號[等級_職業]\`。\n` +
       `• 自動發放本尊與分身專屬職業身分組。`
     )
-    .setFooter({ text: '點擊下方按鈕即可隨時建檔或更新' });
+    .setFooter({ text: '所有按鈕的回覆都只有你自己看得到，不會洗頻' });
 }
 
 function buildRegisterPanelComponents() {
+  // 這張面板是公開貼在頻道的，誰都會按到，所以每一顆都必須「只動按的人自己」，
+  // 而且回覆一律是私密的。特別注意：名片上的 refresh_card 用的是 deferUpdate，
+  // 會去編輯按鈕所在的那則訊息 —— 放到公開面板上會把面板覆蓋成某個人的名片，
+  // 所以這裡用獨立的 panel_my_card，改成私密回覆。
   return [
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('btn_trigger_wizard_main').setLabel('📝 點我『填寫 / 更新』名冊資料').setStyle(ButtonStyle.Success)
+      new ButtonBuilder().setCustomId('btn_trigger_wizard_main').setLabel('📝 報到 / 更新名冊').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('panel_my_card').setLabel('🪪 我的名片').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('card_btn_update_level').setLabel('🆙 更新等級').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('card_btn_rename_char').setLabel('✏️ 改角色名').setStyle(ButtonStyle.Secondary)
     )
   ];
 }
@@ -697,6 +755,10 @@ function createPartyComponents(partyId, isClosed = false, isFull = false) {
   return [row1, row2, row3];
 }
 
+// embed 全部欄位加起來有 6000 字上限，留 4200 給下注清單，其餘讓給標題與狀態列
+const BET_FIELD_TOTAL = 4200;
+const BET_REPORT_ROWS = 20;         // 結算報告每一區最多列幾行，再多就請他看「下注明細」
+
 function createMultiBetEmbed(betData) {
   let playerPool = 0;
   betData.options.forEach(opt => playerPool += (opt.pool || 0));
@@ -712,16 +774,54 @@ function createMultiBetEmbed(betData) {
       `狀態：${betData.isPaused ? '⏸️ **暫停下注**' : (isExpired ? '🔴 **已截止**' : '🟢 **下注進行中**')}\n━━━━━━━━━━━━━━━━━━━━`
     );
 
-  betData.options.forEach((opt, idx) => {
-    const odds = (opt.pool > 0) ? (totalPool / opt.pool).toFixed(2) : (totalPool > 0 ? '超高賠率' : '1.00');
-    const optLabel = `🎯 ${opt.name}`;
-    embed.addFields({ name: optLabel, value: `💵 彩池：\`${formatMeso(opt.pool || 0)}\`\n📈 賠率：\`${odds}x\``, inline: true });
+  // 直接把「誰下注多少」寫在面板上。只寫事實，不寫賠率或預估賺賠——
+  // 那是結算才該出現的東西，提前寫會誤導人。
+  // 這份清單同時是保命索：就算結算流程壞掉，帳還在面板上看得到。
+  let budget = BET_FIELD_TOTAL;
+  betData.options.forEach((opt) => {
+    const bets = Object.values(opt.bets || {}).filter(b => b && b.amount > 0);
+    const head = `💵 彩池：\`${formatMeso(opt.pool || 0)}\`　‧　${bets.length} 人下注`;
+    let body = head;
+
+    if (bets.length && budget > head.length + 40) {
+      const lines = bets
+        .slice()
+        .sort((a, b) => (b.amount || 0) - (a.amount || 0))
+        .map(b => `‧ ${mdSafe(b.ign)} 已下注 \`${formatMeso(b.amount)}\``);
+      const shown = [];
+      let len = head.length;
+      for (const l of lines) {
+        if (len + l.length + 1 > Math.min(1000, budget)) break;
+        shown.push(l); len += l.length + 1;
+      }
+      if (shown.length) body += '\n' + shown.join('\n');
+      if (shown.length < lines.length) body += `\n…還有 ${lines.length - shown.length} 人（按「📋 下注明細」看完整帳本）`;
+    } else if (!bets.length) {
+      body += '\n（還沒有人下注）';
+    }
+
+    budget -= body.length;
+    embed.addFields({ name: `🎯 ${opt.name}`.substring(0, 256), value: body.substring(0, 1024), inline: false });
   });
+
+  const pity = Object.values(betData.pityDonations || {}).filter(b => b && b.amount > 0);
+  if (pity.length) {
+    embed.addFields({
+      name: '🩹 同情抖內',
+      value: pity.map(b => `‧ ${mdSafe(b.ign)} 抖了 \`${formatMeso(b.amount)}\``).join('\n').substring(0, 1024),
+      inline: false
+    });
+  }
   return embed;
 }
 
 function createMultiBetComponents(betId, options, isSettled = false) {
-  if (isSettled) return [];
+  // 結算之後只留明細按鈕。結算報告萬一出問題，帳本還查得到，可以手動派彩。
+  if (isSettled) {
+    return [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`bet_ledger_${betId}`).setLabel('📋 下注明細').setStyle(ButtonStyle.Secondary)
+    )];
+  }
   const rows = [];
   // 選項按鈕：每列最多 5 顆，最多兩列
   for (let i = 0; i < options.length; i += 5) {
@@ -742,6 +842,9 @@ function createMultiBetComponents(betId, options, isSettled = false) {
     new ButtonBuilder().setCustomId(`bet_del_${betId}`).setLabel('🗑️ 廢除').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId(`bet_refresh_${betId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`share_bet_${betId}`).setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary)
+  ));
+  rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`bet_ledger_${betId}`).setLabel('📋 下注明細').setStyle(ButtonStyle.Secondary)
   ));
   return rows;
 }
@@ -867,7 +970,8 @@ const commands = [
         { name: '🧹 一鍵清理名冊中的重複角色 ID', value: 'ADMIN_DEDUPE_ALL' },
         { name: '📌 張貼公開的「報到登記面板」到本頻道', value: 'ADMIN_POST_REGISTER' },
         { name: '⚔️ 查看全體成員的突襲王進度', value: 'ADMIN_RAID_OVERVIEW' },
-        { name: '🩺 一鍵修正超出範圍的等級 (夾回 1~200)', value: 'ADMIN_FIX_LEVELS' }
+        { name: '🩺 一鍵修正超出範圍的等級 (夾回 1~200)', value: 'ADMIN_FIX_LEVELS' },
+        { name: '🏷️ 一鍵重排全公會的伺服器暱稱 (綽號[等級_職業])', value: 'ADMIN_RESYNC_NICKS' }
       )
     )
     .addUserOption(o => o.setName('對象成員').setDescription('代填名冊時選擇對象成員 (@成員)').setRequired(false))
@@ -1424,6 +1528,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               `5. 📌 **張貼公開的報到登記面板** (\`/管理員功能 模式:張貼報到面板\`)\n` +
               `6. ⚔️ **查看全體突襲王進度** (\`/管理員功能 模式:全體突襲進度\`)\n` +
               `7. 🩺 **一鍵修正超出範圍的等級** (\`/管理員功能 模式:一鍵修正等級\`)\n` +
+              `8. 🏷️ **一鍵重排全公會伺服器暱稱** —— 照名冊把每個人的暱稱重新套成 \`綽號[等級_職業]\`，改不動的會列出原因\n` +
               `8. 🚪 **強制刪除揪團 / 廢除賭局**`
             );
           return await interaction.reply({ embeds: [helpEmbed], flags: MessageFlags.Ephemeral });
@@ -1498,6 +1603,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const snap = await db.collection('member_profiles').get();
           let touched = 0, fixedCount = 0;
           const detail = [];
+          const nickFails = [];
 
           for (const docSnap of snap.docs) {
             const d = docSnap.data();
@@ -1531,12 +1637,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
             // 本尊等級被夾回來的話，身分組與暱稱要跟著重算
             if (payload.mainLevel) {
               const merged = { ...d, ...payload, subs };
+              const r = await applyNickname(interaction.guild, docSnap.id, rosterNickname(merged));
+              if (!r.ok) nickFails.push(`• <@${docSnap.id}>：${r.reason}`);
               await syncMemberRoles(interaction.guild, docSnap.id, merged);
-              const member = await interaction.guild.members.fetch(docSnap.id).catch(() => null);
-              if (member) {
-                const nick = `${d.nickname || ''}[${payload.mainLevel}_${d.mainJob}]`.substring(0, 32);
-                await member.setNickname(nick).catch(() => {});
-              }
             }
           }
 
@@ -1547,7 +1650,45 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .setDescription(
               `共修正 **${touched}** 位成員、**${fixedCount}** 隻角色（超過 200 一律夾回 200）。\n` +
               `━━━━━━━━━━━━━━━━\n` + detail.join('\n') +
-              (touched > detail.length ? `\n…其餘 ${touched - detail.length} 位未列出` : '')
+              (touched > detail.length ? `\n…其餘 ${touched - detail.length} 位未列出` : '') +
+              (nickFails.length
+                ? `\n\n⚠️ **這幾位的伺服器暱稱沒改成功**\n${nickFails.slice(0, 5).join('\n')}`
+                  + (nickFails.length > 5 ? `\n…還有 ${nickFails.length - 5} 位` : '')
+                : '')
+            );
+          return await interaction.editReply({ embeds: [embed] });
+        }
+
+        if (mode === 'ADMIN_RESYNC_NICKS') {
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+          const snap = await db.collection('member_profiles').get();
+          let done = 0, already = 0;
+          const fails = [];
+          const owners = [];
+          let hierarchyHint = '';
+
+          for (const docSnap of snap.docs) {
+            const want = rosterNickname(docSnap.data());
+            if (!want) continue;
+            const r = await applyNickname(interaction.guild, docSnap.id, want);
+            if (r.ok && r.skipped) { already++; continue; }
+            if (r.ok) { done++; await sleep(350); continue; }   // 放慢一點，避免被 Discord 限流
+            if (r.owner) { owners.push(`<@${docSnap.id}>`); continue; }
+            if (r.hierarchy && !hierarchyHint) hierarchyHint = r.reason;
+            if (fails.length < 8) fails.push(`• <@${docSnap.id}>：${r.reason}`);
+            else fails.push('');
+          }
+
+          const embed = new EmbedBuilder()
+            .setColor(fails.length ? 0xF1C40F : 0x57F287)
+            .setTitle('🏷️【伺服器暱稱重排完成】')
+            .setDescription(
+              `改好 **${done}** 位　‧　本來就正確 **${already}** 位　‧　改不動 **${fails.length}** 位\n`
+              + '━━━━━━━━━━━━━━━━\n'
+              + (fails.length ? fails.filter(Boolean).join('\n') : '✅ 全部都是正確的格式。')
+              + (fails.length > 8 ? `\n…還有 ${fails.length - 8} 位` : '')
+              + (owners.length ? `\n\n👑 伺服器擁有者（${owners.join('、')}）Discord 規定改不了，只能本人自己改。` : '')
+              + (hierarchyHint ? `\n\n💡 **多數失敗都是同一個原因**：${hierarchyHint}` : '')
             );
           return await interaction.editReply({ embeds: [embed] });
         }
@@ -1723,17 +1864,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         }
 
+        // 先改名再加身分組：順序反過來的話，剛加上的職業身分組如果排在機器人上面，
+        // 這個人當下就變成「改不動」，改名必定失敗。
+        const nickResult = await applyNickname(
+          interaction.guild, targetUid, rosterNickname({ nickname, mainLevel, mainJob })
+        );
+
         await syncMemberRoles(interaction.guild, targetUid, {
           mainJob, mainLevel, subs: validSubs, isRetired: !!session.isRetired
         });
-
-        try {
-          const member = await interaction.guild.members.fetch(targetUid).catch(() => null);
-          if (member) {
-            const formattedNick = `${nickname}[${mainLevel}_${mainJob}]`.substring(0, 32);
-            await member.setNickname(formattedNick).catch(() => {});
-          }
-        } catch {}
 
         wizardSessionMap.delete(interaction.user.id);
 
@@ -1746,8 +1885,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await publicChannel.send({ content: `<@${targetUid}>`, embeds: [publicEmbed] }).catch(() => {});
         }
 
+        // 改名失敗就要講，不能再回「已同步更新」唬人
+        const nickNote = nickResult.ok
+          ? ''
+          : `\n\n⚠️ **伺服器暱稱沒改成功**：${nickResult.reason}\n（名冊資料本身已經存好了，不影響）`;
+
         return await interaction.editReply(
-          `🎉 恭喜完成名冊建檔！成員 <@${targetUid}> 的本尊與 ${validSubs.length} 隻分身已建檔，身分組與伺服器暱稱已同步更新！` +
+          `🎉 恭喜完成名冊建檔！成員 <@${targetUid}> 的本尊與 ${validSubs.length} 隻分身已建檔，身分組${nickResult.ok ? '與伺服器暱稱' : ''}已同步更新！` + nickNote +
           (dedupedCount > 0 ? `\n🧹 偵測到 **${dedupedCount}** 筆重複角色 ID，已自動以最新資料覆蓋。` : '')
         );
       }
@@ -2080,6 +2224,53 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.showModal(modal);
       }
 
+      // 📋 下注明細：保命索。不做賠率、不做派彩，純粹把資料庫裡的數字印出來。
+      // 結算流程再怎麼壞，這條路都還在，你永遠有辦法手動對帳。
+      if (customId.startsWith('bet_ledger_')) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const bId = customId.replace('bet_ledger_', '');
+        const doc = await db.collection('active_bets').doc(bId).get().catch(() => null);
+        if (!doc?.exists) return interaction.editReply('❌ 這個賭局已經不存在了。');
+        const d = doc.data();
+
+        let player = 0;
+        (d.options || []).forEach(o => player += (o.pool || 0));
+        const lines = [`📋 **【下注明細】${mdSafe(d.title || '')}**`];
+        if (d.seedMoney > 0) lines.push(`🎁 底池加碼：\`${formatMeso(d.seedMoney)}\`（<@${d.creatorId}> 出）`);
+        lines.push('━━━━━━━━━━━━━━━━');
+
+        (d.options || []).forEach((o, i) => {
+          const bets = Object.entries(o.bets || {}).filter(([, b]) => b && b.amount > 0);
+          lines.push(`🎯 **${mdSafe(o.name)}**　彩池 \`${formatMeso(o.pool || 0)}\`　${bets.length} 人`);
+          if (!bets.length) lines.push('　　（無）');
+          bets.sort((a, b) => b[1].amount - a[1].amount)
+            .forEach(([uid, b]) => lines.push(`　　‧ ${mdSafe(b.ign)}（<@${uid}>）\`${formatMeso(b.amount)}\``));
+        });
+
+        const pity = Object.entries(d.pityDonations || {}).filter(([, b]) => b && b.amount > 0);
+        if (pity.length) {
+          lines.push('🩹 **同情抖內**');
+          pity.forEach(([uid, b]) => lines.push(`　　‧ ${mdSafe(b.ign)}（<@${uid}>）\`${formatMeso(b.amount)}\``));
+        }
+        lines.push('━━━━━━━━━━━━━━━━');
+        lines.push(`💰 總彩池：\`${formatMeso(player + (d.seedMoney || 0))}\`　‧　狀態：${d.isSettled ? '已結算' : '進行中'}`);
+
+        // 單則訊息上限 2000 字，分段送，寧可多幾則也不要截掉帳
+        const chunks = [];
+        let buf = '';
+        for (const l of lines) {
+          if (buf.length + l.length + 1 > 1900) { chunks.push(buf); buf = ''; }
+          buf += (buf ? '\n' : '') + l;
+        }
+        if (buf) chunks.push(buf);
+
+        await interaction.editReply(chunks[0]);
+        for (const c of chunks.slice(1)) {
+          await interaction.followUp({ content: c, flags: MessageFlags.Ephemeral }).catch(() => {});
+        }
+        return;
+      }
+
       if (customId.startsWith('bet_settle_') || customId.startsWith('bet_del_')) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const isDelete = customId.startsWith('bet_del_');
@@ -2233,8 +2424,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             new TextInputBuilder().setCustomId('mq_end').setLabel('結束時間，或直接填幾小時')
               .setPlaceholder('09:45　或　填 4 代表 4 小時　‧　留空＝48 小時').setStyle(TextInputStyle.Short).setRequired(false)),
           new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('mq_buy').setLabel('買圖價格（留空＝免費團）')
-              .setPlaceholder('例如 5000w').setStyle(TextInputStyle.Short).setRequired(false))
+            new TextInputBuilder().setCustomId('mq_buy').setLabel('買圖價格（填 0 ＝免費團；留空＝之後再填）')
+              .setPlaceholder('例如 5000w　‧　免費就填 0').setStyle(TextInputStyle.Short).setRequired(false))
         );
         return await interaction.showModal(modal);
       }
@@ -2280,13 +2471,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
               .setValue(String(rot.note || '')).setStyle(TextInputStyle.Paragraph).setRequired(false)
           ),
           new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('rot_e_buy').setLabel('買圖價格（留空或 0 ＝ 免費團）')
-              .setValue(rot.buyPrice > 0 ? String(rot.buyPrice) : '')
-              .setPlaceholder('例如 5000w').setStyle(TextInputStyle.Short).setRequired(false)
+            new TextInputBuilder().setCustomId('rot_e_buy').setLabel('買圖價格（填 0 ＝免費團；留空＝還沒決定）')
+              .setValue(rotPriceSet(rot) ? String(rot.buyPrice || 0) : '')
+              .setPlaceholder('例如 5000w　‧　免費就填 0').setStyle(TextInputStyle.Short).setRequired(false)
           ),
           new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('rot_e_split').setLabel('分攤方式：均攤 或 時間')
-              .setValue(rotSplitLabel(rot.splitMode)).setStyle(TextInputStyle.Short).setRequired(false)
+            new TextInputBuilder().setCustomId('rot_e_split').setLabel('分攤方式：均攤 / 時間 / 不分攤')
+              .setValue(rotSplitLabel(rot.splitMode))
+              .setPlaceholder('不分攤 = 費用全由墊付人負擔，大家不用付')
+              .setStyle(TextInputStyle.Short).setRequired(false)
           )
         );
         return await interaction.showModal(modal);
@@ -2424,8 +2617,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ),
           new ActionRowBuilder().addComponents(
             new TextInputBuilder().setCustomId('rot_split_mode')
-              .setLabel('分攤方式：填「均攤」或「時間」')
-              .setPlaceholder('均攤 = 每人一樣多　‧　時間 = 依佔的時段比例')
+              .setLabel('分攤方式：均攤 / 時間 / 不分攤')
+              .setPlaceholder('均攤＝每人一樣　‧　時間＝依時段比例　‧　不分攤＝墊付人全出')
               .setStyle(TextInputStyle.Short).setRequired(false)
           )
         );
@@ -2480,6 +2673,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       // ── 🔄 即時更新：一律強制重讀資料庫，不吃任何快取 ──
+      // 🪪 我的名片（公開面板用）。跟 refresh_card 的差別是這裡開新的私密回覆，
+      // 不會去動按鈕所在的那則公開訊息。
+      if (customId === 'panel_my_card') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const r = await fetchProfile(interaction.user.id);
+        if (!r.ok) return await interaction.editReply(DB_SLOW_MSG);
+        if (!r.exists || !r.data.mainIgn) {
+          return await interaction.editReply('📜 你還沒有名冊資料，先按上面的「📝 報到 / 更新名冊」建檔吧。');
+        }
+        return await interaction.editReply(buildMyCardPayload(r.data));
+      }
+
       if (customId === 'refresh_card') {
         await interaction.deferUpdate();
         const r = await fetchProfile(interaction.user.id);
@@ -2612,6 +2817,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
             ? '🚪 已幫你加上 **退休** 身分組。原本的職業身分組與名冊紀錄都保留著，名冊上會標示「已退休」，之後就不會有人約你打王了。'
             : '🔄 歡迎回鍋！退休身分組已移除，其他身分組本來就沒動過。',
           flags: MessageFlags.Ephemeral
+        });
+      }
+
+      // ✏️ 改角色名：只改名字，職業與等級原封不動。
+      // 以前只能「刪掉再新增」，職業等級要重打一次，楓之谷改名卡又不便宜。
+      if (customId === 'card_btn_rename_char' || customId === 'admin_panel_rename') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const isAdminPath = customId === 'admin_panel_rename';
+        if (isAdminPath && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.editReply('❌ 僅超級管理員可使用！');
+        }
+        const targetUid = isAdminPath
+          ? (userChoiceMap.get(`admin_panel_target_${interaction.user.id}`) || interaction.user.id)
+          : interaction.user.id;
+
+        const r = await fetchProfile(targetUid);
+        if (!r.ok) return interaction.editReply(DB_SLOW_MSG);
+        const row = buildRenamePickRow(targetUid, r.data);
+        if (!row) return interaction.editReply('💡 名冊裡還沒有角色可以改名，請先完成報到。');
+        return await interaction.editReply({
+          content: isAdminPath
+            ? `✏️ **代改角色名**：要改 <@${targetUid}> 的哪一隻？\n*只會改名字，職業與等級不動。*`
+            : '✏️ **改角色名**：要改哪一隻？\n*只會改名字，職業與等級不動。*',
+          components: [row]
         });
       }
 
@@ -3359,94 +3588,160 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (customId.startsWith('settle_fin_')) {
         await interaction.deferReply();
         const bId = customId.replace('settle_fin_', '');
-        const winIdx = parseInt(interaction.values[0]);
-        const doc = await db.collection('active_bets').doc(bId).get();
-        if (!doc.exists) return interaction.editReply('❌ 賭局已失效。');
-        const d = doc.data();
+        try {
+          const winIdx = parseInt(interaction.values[0]);
+          const doc = await db.collection('active_bets').doc(bId).get();
+          if (!doc.exists) return interaction.editReply('❌ 賭局已失效。');
+          const d = doc.data();
 
-        let playerPool = 0, winPool = d.options[winIdx].pool || 0;
-        d.options.forEach(o => playerPool += (o.pool || 0));
-        const totalPool = playerPool + (d.seedMoney || 0);
-        const loserPool = totalPool - winPool;
+          // 重複結算會再派彩一次。按鈕可能被按兩下，或上一次貼報告失敗後重按。
+          if (d.isSettled) {
+            return interaction.editReply('💡 這局已經結算過了，不會重複派彩。要看帳請按面板上的「📋 下注明細」。');
+          }
+          if (!Number.isFinite(winIdx) || !d.options?.[winIdx]) {
+            return interaction.editReply('❌ 這個選項已經不存在了，請重新按「⚖️ 結算」。');
+          }
 
-        const balances = {};
-        if (d.seedMoney > 0) balances[d.creatorId] = { ign: d.creatorName || '發起人底池', net: -d.seedMoney };
+          let playerPool = 0;
+          const winPool = d.options[winIdx].pool || 0;
+          d.options.forEach(o => playerPool += (o.pool || 0));
+          const totalPool = playerPool + (d.seedMoney || 0);
+          const loserPool = totalPool - winPool;
 
-        d.options.forEach(o => {
-          Object.entries(o.bets || {}).forEach(([uid, b]) => {
-            if (!balances[uid]) balances[uid] = { ign: b.ign, net: 0 };
-            balances[uid].net -= b.amount;
-          });
-        });
+          const balances = {};
+          if (d.seedMoney > 0) balances[d.creatorId] = { ign: d.creatorName || '發起人底池', net: -d.seedMoney };
 
-        const winnerList = [], loserList = [], donorList = [];
-        Object.entries(d.options[winIdx].bets || {}).forEach(([uid, b]) => {
-          const share = winPool > 0 ? (b.amount / winPool) * loserPool : 0;
-          const profit = Math.floor(share);
-          balances[uid].net += (b.amount + profit);
-          winnerList.push({ ign: b.ign, bet: b.amount, gain: profit });
-        });
-
-        d.options.forEach((o, idx) => {
-          if (idx !== winIdx) {
+          d.options.forEach(o => {
             Object.entries(o.bets || {}).forEach(([uid, b]) => {
-              loserList.push({ ign: b.ign, bet: b.amount });
+              if (!balances[uid]) balances[uid] = { ign: b.ign, net: 0 };
+              balances[uid].net -= b.amount;
             });
-          }
-        });
-
-        Object.entries(d.pityDonations || {}).forEach(([uid, b]) => {
-          donorList.push({ ign: b.ign, amount: b.amount });
-        });
-
-        // 沒有「類型」了，改看勝方文字：含「過」且不含「不過」就當作點過
-        const winName = d.options[winIdx].name;
-        const isBookPassed = winName.includes('過') && !winName.includes('不過');
-
-        let ansiReport = '```ansi\n';
-        ansiReport += '\u001b[1;32m🏆 贏家【哪有賭狗天天輸？How to lose？】\u001b[0m\n';
-        if (winnerList.length) {
-          winnerList.forEach(w => ansiReport += `\u001b[32m[${w.ign} _ 下注 ${formatMeso(w.bet)} _ +${formatMeso(w.gain)} 楓幣]\u001b[0m\n`);
-        } else {
-          ansiReport += '\u001b[32m• 本局無人押中勝方\u001b[0m\n';
-        }
-
-        ansiReport += '\n\u001b[1;31m💀 輸家【賭狗賭狗，賭到最後一無所有】\u001b[0m\n';
-        if (loserList.length) {
-          loserList.forEach(l => ansiReport += `\u001b[31m[${l.ign} _ 下注 ${formatMeso(l.bet)} _ -${formatMeso(l.bet)} 楓幣]\u001b[0m\n`);
-        } else {
-          ansiReport += '\u001b[31m• 本局無輸家\u001b[0m\n';
-        }
-
-        if (donorList.length) {
-          ansiReport += '\n\u001b[1;36m🩹 慈善家【人間自有真情在】\u001b[0m\n';
-          donorList.forEach(dn => {
-            const quote = isBookPassed ? getRandomBookSuccessQuote() : getRandomPityQuote();
-            const payText = isBookPassed ? '(恭喜過書，善款無須支付)' : `-${formatMeso(dn.amount)} 楓幣`;
-            ansiReport += `\u001b[36m[${dn.ign} _ ${quote} _ ${payText}]\u001b[0m\n`;
           });
-        }
-        ansiReport += '```';
 
-        const transfers = calculateMinTransfers(balances);
-        let tGuide = `🧾 **【最少交易轉帳清單】**\n` + (transfers.length ? transfers.map((t, i) => `${i + 1}. ➡️ **${t.from}** 交易給 **${t.to}**：\`${formatMeso(t.amount)} 楓幣\``).join('\n') : '• 本局無須進行跨玩家轉帳');
+          const winnerList = [], loserList = [], donorList = [];
+          Object.entries(d.options[winIdx].bets || {}).forEach(([uid, b]) => {
+            const share = winPool > 0 ? (b.amount / winPool) * loserPool : 0;
+            const profit = Math.floor(share);
+            if (!balances[uid]) balances[uid] = { ign: b.ign, net: 0 };
+            balances[uid].net += (b.amount + profit);
+            winnerList.push({ ign: b.ign, bet: b.amount, gain: profit });
+          });
 
-        await db.collection('active_bets').doc(bId).update({ isSettled: true });
+          d.options.forEach((o, idx) => {
+            if (idx !== winIdx) {
+              Object.entries(o.bets || {}).forEach(([, b]) => loserList.push({ ign: b.ign, bet: b.amount }));
+            }
+          });
 
-        const embed = new EmbedBuilder()
-          .setColor(0xF1C40F)
-          .setTitle(`🎉【競猜結算】${d.title}`)
-          .setDescription(`🏆 **最終獲勝**：**【${d.options[winIdx].name}】**\n💰 **公開總彩池**：\`${formatMeso(totalPool)} 楓幣\`\n\n${ansiReport}\n${tGuide}`);
+          Object.entries(d.pityDonations || {}).forEach(([, b]) => donorList.push({ ign: b.ign, amount: b.amount }));
 
-        if (d.channelId && d.messageId) {
-          const ch = await client.channels.fetch(d.channelId).catch(() => null);
-          if (ch) {
-            const m = await ch.messages.fetch(d.messageId).catch(() => null);
-            if (m) await m.edit({ embeds: [createMultiBetEmbed({ ...d, isSettled: true })], components: createMultiBetComponents(bId, d.options, true) }).catch(() => {});
+          // 沒有「類型」了，改看勝方文字：含「過」且不含「不過」就當作點過
+          const winName = d.options[winIdx].name;
+          const isBookPassed = winName.includes('過') && !winName.includes('不過');
+
+          // 人一多，ansi 報告很容易撐破 embed 的 4096 字上限，撐破就整個結算丟錯。
+          // 寧可截斷也不能讓它爆 —— 完整帳本在「📋 下注明細」。
+          const cap = (arr, max) => ({ shown: arr.slice(0, max), rest: Math.max(0, arr.length - max) });
+          const W = cap(winnerList, BET_REPORT_ROWS);
+          const L = cap(loserList, BET_REPORT_ROWS);
+          const DN = cap(donorList, BET_REPORT_ROWS);
+
+          let ansiReport = '```ansi\n';
+          ansiReport += '\u001b[1;32m🏆 贏家【哪有賭狗天天輸？How to lose？】\u001b[0m\n';
+          if (W.shown.length) {
+            W.shown.forEach(w => ansiReport += `\u001b[32m[${codeSafe(w.ign)} _ 下注 ${formatMeso(w.bet)} _ +${formatMeso(w.gain)} 楓幣]\u001b[0m\n`);
+            if (W.rest) ansiReport += `\u001b[32m… 還有 ${W.rest} 位，請按「📋 下注明細」\u001b[0m\n`;
+          } else {
+            ansiReport += '\u001b[32m• 本局無人押中勝方\u001b[0m\n';
           }
+
+          ansiReport += '\n\u001b[1;31m💀 輸家【賭狗賭狗，賭到最後一無所有】\u001b[0m\n';
+          if (L.shown.length) {
+            L.shown.forEach(l => ansiReport += `\u001b[31m[${codeSafe(l.ign)} _ 下注 ${formatMeso(l.bet)} _ -${formatMeso(l.bet)} 楓幣]\u001b[0m\n`);
+            if (L.rest) ansiReport += `\u001b[31m… 還有 ${L.rest} 位，請按「📋 下注明細」\u001b[0m\n`;
+          } else {
+            ansiReport += '\u001b[31m• 本局無輸家\u001b[0m\n';
+          }
+
+          if (DN.shown.length) {
+            ansiReport += '\n\u001b[1;36m🩹 慈善家【人間自有真情在】\u001b[0m\n';
+            DN.shown.forEach(dn => {
+              const quote = isBookPassed ? getRandomBookSuccessQuote() : getRandomPityQuote();
+              const payText = isBookPassed ? '(恭喜過書，善款無須支付)' : `-${formatMeso(dn.amount)} 楓幣`;
+              ansiReport += `\u001b[36m[${codeSafe(dn.ign)} _ ${quote} _ ${payText}]\u001b[0m\n`;
+            });
+            if (DN.rest) ansiReport += `\u001b[36m… 還有 ${DN.rest} 位\u001b[0m\n`;
+          }
+          ansiReport += '```';
+
+          const transfers = calculateMinTransfers(balances);
+          const tShown = transfers.slice(0, BET_REPORT_ROWS);
+          let tGuide = '🧾 **【最少交易轉帳清單】**\n' + (tShown.length
+            ? tShown.map((t, i) => `${i + 1}. ➡️ **${mdSafe(t.from)}** 交易給 **${mdSafe(t.to)}**：\`${formatMeso(t.amount)} 楓幣\``).join('\n')
+            : '• 本局無須進行跨玩家轉帳');
+          if (transfers.length > tShown.length) tGuide += `\n… 還有 ${transfers.length - tShown.length} 筆，請按「📋 下注明細」自行對帳`;
+
+          let desc = `🏆 **最終獲勝**：**【${mdSafe(winName)}】**\n💰 **公開總彩池**：\`${formatMeso(totalPool)} 楓幣\`\n\n${ansiReport}\n${tGuide}`;
+          if (desc.length > 4000) desc = desc.slice(0, 3950) + '\n…（內容過長已截斷，完整帳目請按「📋 下注明細」）';
+
+          const embed = new EmbedBuilder()
+            .setColor(0xF1C40F)
+            .setTitle(`🎉【競猜結算】${d.title}`.substring(0, 256))
+            .setDescription(desc);
+
+          // 先把報告貼出去，成功了才標記已結算。
+          // 反過來做的話，報告一出錯就變成「已結算但沒有結果」，面板按鈕也跟著消失，
+          // 誰都沒辦法再結算一次 —— 那局就永遠卡在那裡。
+          await interaction.editReply({ embeds: [embed] });
+          await db.collection('active_bets').doc(bId).update({ isSettled: true, winIdx, settledAt: Date.now() });
+
+          if (d.channelId && d.messageId) {
+            const ch = await client.channels.fetch(d.channelId).catch(() => null);
+            if (ch) {
+              const m = await ch.messages.fetch(d.messageId).catch(() => null);
+              if (m) await m.edit({
+                embeds: [createMultiBetEmbed({ ...d, isSettled: true })],
+                components: createMultiBetComponents(bId, d.options, true)
+              }).catch(() => {});
+            }
+          }
+          return;
+        } catch (e) {
+          console.error('賭局結算失敗:', e);
+          return await interaction.editReply(
+            '❌ 結算的時候出錯了，**這局還沒有被標記為已結算**，可以直接再按一次「⚖️ 結算」。\n'
+            + `錯誤訊息：\`${String(e?.message || e).substring(0, 300)}\`\n`
+            + '如果一直失敗，請按面板上的「📋 下注明細」拿到完整帳本手動派彩。'
+          ).catch(() => {});
+        }
+      }
+
+      // 改名第二步：跳表單填新名字。showModal 前不能 defer，所以用快取讀。
+      if (customId === 'select_char_to_rename') {
+        const m = String(interaction.values[0] || '').match(/^ren_(\d+)_(-?\d+)$/);
+        if (!m) return interaction.reply({ content: '❌ 這個選項已失效，請重新開啟面板。', flags: MessageFlags.Ephemeral });
+        const targetUid = m[1];
+        const idx = parseInt(m[2], 10);
+        if (targetUid !== interaction.user.id && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.reply({ content: '❌ 你只能改自己的角色名。', flags: MessageFlags.Ephemeral });
         }
 
-        return await interaction.editReply({ embeds: [embed] });
+        const r = await fetchProfileFast(targetUid);
+        if (!r.ok) return interaction.reply({ content: DB_SLOW_MSG, flags: MessageFlags.Ephemeral });
+        const hit = listCharacters(r.data).find(c => c.idx === idx);
+        if (!hit) return interaction.reply({ content: '❌ 找不到這隻角色，請重新開啟面板。', flags: MessageFlags.Ephemeral });
+
+        const modal = new ModalBuilder()
+          .setCustomId(`modal_rename_char_${targetUid}_${idx}`)
+          .setTitle(`改角色名稱（${hit.isMain ? '本尊' : '分身'}）`.substring(0, 45));
+        modal.addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('new_ign')
+            .setLabel(`新的角色名稱（原本：${hit.ign}）`.substring(0, 45))
+            .setValue(hit.ign)
+            .setPlaceholder('只改名字，職業與等級不會變')
+            .setStyle(TextInputStyle.Short).setRequired(true)
+        ));
+        return await interaction.showModal(modal);
       }
 
       // 10. 名片更新等級與刪除
@@ -3555,6 +3850,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('admin_panel_add').setLabel('➕ 代添角色').setStyle(ButtonStyle.Success),
           new ButtonBuilder().setCustomId('admin_panel_lvl').setLabel('🆙 代更等級').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('admin_panel_rename').setLabel('✏️ 代改角色名').setStyle(ButtonStyle.Secondary),
           new ButtonBuilder().setCustomId('admin_panel_del').setLabel('🗑️ 代刪角色').setStyle(ButtonStyle.Danger),
           new ButtonBuilder().setCustomId('admin_panel_retire').setLabel('🚪 標記/取消退休').setStyle(ButtonStyle.Secondary)
         );
@@ -3891,7 +4187,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const chanRaw = String(interaction.fields.getTextInputValue('mq_chan') || '').replace(/[^0-9]/g, '');
         const startRaw = (interaction.fields.getTextInputValue('mq_start') || '').trim();
         const endRaw = (interaction.fields.getTextInputValue('mq_end') || '').trim();
-        const buyPrice = parseMoneyInput(interaction.fields.getTextInputValue('mq_buy'));
+        const buyRaw = (interaction.fields.getTextInputValue('mq_buy') || '').trim();
+        const buyPrice = parseMoneyInput(buyRaw);
+        const priceSet = buyRaw !== '';
 
         let startMs;
         if (startRaw) {
@@ -3936,7 +4234,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           channelNum: parseInt(chanRaw) || 0,          // 0 = 還沒決定
           note: '無特殊備註',
           slotMinutes, startMs, slotCount, spanHours,
-          buyPrice, splitMode: ROT_SPLIT_EVEN, allowShare: false, sellPrice: 0, settled: false,
+          buyPrice, priceSet,
+          // 明確填 0 就是免費團，沒東西好分；留空代表還沒決定，之後用 ✏️ 修改內容補
+          splitMode: (priceSet && buyPrice === 0) ? ROT_SPLIT_NONE : ROT_SPLIT_EVEN,
+          allowShare: false, sellPrice: 0, settled: false,
           payerId: interaction.user.id,      // 出錢買圖、結算時收錢的人
           collectorId: interaction.user.id,   // 催收對帳的人，可在「👥 代登記／墊付收款」換掉
           gapAsked: [],
@@ -4074,24 +4375,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const mapName = (interaction.fields.getTextInputValue('rot_e_map') || '').trim() || rot.mapName;
         const note = (interaction.fields.getTextInputValue('rot_e_note') || '').trim() || '無特殊備註';
-        const buyPrice = parseMoneyInput(interaction.fields.getTextInputValue('rot_e_buy'));
+        const buyRaw = (interaction.fields.getTextInputValue('rot_e_buy') || '').trim();
+        const buyPrice = parseMoneyInput(buyRaw);
+        const priceSet = buyRaw !== '';
         const splitRaw = (interaction.fields.getTextInputValue('rot_e_split') || '').trim();
-        const splitMode = splitRaw
-          ? (/時間|time|比例/i.test(splitRaw) ? ROT_SPLIT_TIME : ROT_SPLIT_EVEN)
-          : (rot.splitMode || ROT_SPLIT_EVEN);
+        const splitMode = rotParseSplitMode(splitRaw, rot.splitMode || ROT_SPLIT_EVEN);
 
+        const priceWord = (set, p) => (!set ? '還沒決定' : p > 0 ? formatMeso(p) : '0（免費團）');
         const changes = [];
         if (mapName !== rot.mapName) changes.push(`地圖：${rot.mapName} ➔ ${mapName}`);
         if (note !== rot.note) changes.push('備註已更新');
-        if (buyPrice !== (rot.buyPrice || 0)) {
-          changes.push(`買圖：${rot.buyPrice > 0 ? formatMeso(rot.buyPrice) : '免費'} ➔ ${buyPrice > 0 ? formatMeso(buyPrice) : '免費'}`);
+        if (buyPrice !== (rot.buyPrice || 0) || priceSet !== rotPriceSet(rot)) {
+          changes.push(`買圖：${priceWord(rotPriceSet(rot), rot.buyPrice || 0)} ➔ ${priceWord(priceSet, buyPrice)}`);
         }
         if (splitMode !== rot.splitMode) changes.push(`分攤方式：${rotSplitLabel(rot.splitMode)} ➔ ${rotSplitLabel(splitMode)}`);
 
         if (!changes.length) return interaction.editReply('💡 沒有任何變動。');
 
-        await ref.update({ mapName, note, buyPrice, splitMode });
-        const merged = { ...rot, mapName, note, buyPrice, splitMode };
+        await ref.update({ mapName, note, buyPrice, priceSet, splitMode });
+        const merged = { ...rot, mapName, note, buyPrice, priceSet, splitMode };
         cacheRot(rotId, merged);
         await refreshRotationMessage(rotId, merged, interaction);
         return interaction.editReply(`✅ 已更新：\n${changes.map(c => `‧ ${c}`).join('\n')}`);
@@ -4112,14 +4414,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const sellPrice = parseMoneyInput(interaction.fields.getTextInputValue('rot_sell_price'));
         const modeRaw = (interaction.fields.getTextInputValue('rot_split_mode') || '').trim();
-        const splitMode = modeRaw
-          ? (/時間|time|比例/i.test(modeRaw) ? ROT_SPLIT_TIME : ROT_SPLIT_EVEN)
-          : (rot.splitMode || ROT_SPLIT_EVEN);
+        const splitMode = rotParseSplitMode(modeRaw, rot.splitMode || ROT_SPLIT_EVEN);
 
         const merged = { ...rot, sellPrice, splitMode };
         const net = (merged.buyPrice || 0) - sellPrice;
 
-        // 賣得比買得貴 → 問開表者要不要把賺的分給大家
+        // 賣得比買得貴 → 問開表者要不要把賺的分給大家。
+        // 但「不分攤」本來就是賺賠都算墊付人的，再問一次只是多一步。
+        if (net < 0 && splitMode === ROT_SPLIT_NONE) {
+          await ref.update({ sellPrice, splitMode, isClosed: true, settled: true, shareProfit: false });
+          return await rotPostSettlement(interaction, rotId, { ...merged, isClosed: true, settled: true }, false);
+        }
         if (net < 0) {
           await ref.update({ sellPrice, splitMode });
           const row = new ActionRowBuilder().addComponents(
@@ -4280,12 +4585,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const merged = { ...profile, ...payload, subs };
         await syncMemberRoles(interaction.guild, targetUid, merged);
 
+        let bulkNick = { ok: true };
         if (mainNewLevel !== null) {
-          const member = await interaction.guild.members.fetch(targetUid).catch(() => null);
-          if (member) {
-            const nick = `${profile.nickname || ''}[${mainNewLevel}_${profile.mainJob}]`.substring(0, 32);
-            await member.setNickname(nick).catch(() => {});
-          }
+          bulkNick = await applyNickname(interaction.guild, targetUid,
+            rosterNickname({ ...profile, mainLevel: mainNewLevel }));
           const targetUser = await client.users.fetch(targetUid).catch(() => null);
           if (targetUser) {
             const milestone = await checkLevelMilestone(
@@ -4305,9 +4608,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
             lines +
             (same.length ? `\n━━━━━━━━━━━━━━━━━━━━\n⏸️ 未變動 ${same.length} 隻` : '') +
             (unknown.length ? `\n⚠️ 名冊裡找不到：${unknown.map(x => '`' + x + '`').join('、')}` : '') +
-            (bad.length ? `\n⚠️ 看不懂的行：${bad.slice(0, 5).map(x => '`' + x + '`').join('、')}` : '')
+            (bad.length ? `\n⚠️ 看不懂的行：${bad.slice(0, 5).map(x => '`' + x + '`').join('、')}` : '') +
+            (bulkNick.ok ? '' : `\n\n⚠️ **伺服器暱稱沒改成功**：${bulkNick.reason}`)
           )
-          .setFooter({ text: mainNewLevel !== null ? '本尊等級有變動，暱稱與身分組已同步' : '身分組已同步' });
+          .setFooter({ text: mainNewLevel !== null
+            ? (bulkNick.ok ? '本尊等級有變動，暱稱與身分組已同步' : '本尊等級有變動，身分組已同步（暱稱見上方說明）')
+            : '身分組已同步' });
 
         return await interaction.editReply({ embeds: [resultEmbed] });
       }
@@ -4399,8 +4705,60 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         await refreshBetMessage(bId, fresh, interaction);
 
+        // 累計金額一定要從交易寫完的 fresh 讀，不能用交易外面的變數——
+        // 之前這裡用了一個只存在於交易回呼裡的 cur，錢寫進去了但回覆丟 ReferenceError，
+        // 使用者只看到「處理超時」，然後被叫去重試，一重試就變成下注兩次。
+        const mine = fresh.options?.[optIdx]?.bets?.[interaction.user.id]?.amount || amt;
         return await interaction.editReply(
-          `✅ 已為 **${d.options[optIdx].name}** 下注 \`${formatMeso(amt)} 楓幣\`！（你在這個選項累計 ${formatMeso(cur + amt)}）`
+          `✅ 已為 **${fresh.options[optIdx].name}** 下注 \`${formatMeso(amt)} 楓幣\`！（你在這個選項累計 ${formatMeso(mine)}）`
+        );
+      }
+
+      // 改名第三步：寫回名冊。只動 ign，職業、等級、突襲進度全部不碰。
+      if (customId.startsWith('modal_rename_char_')) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const rest = customId.replace('modal_rename_char_', '');
+        const cut = rest.lastIndexOf('_');
+        const targetUid = rest.slice(0, cut);
+        const idx = parseInt(rest.slice(cut + 1), 10);
+        if (targetUid !== interaction.user.id && !isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.editReply('❌ 你只能改自己的角色名。');
+        }
+
+        const newIgn = (interaction.fields.getTextInputValue('new_ign') || '').trim().slice(0, 30);
+        if (!newIgn) return interaction.editReply('❌ 角色名稱不能是空的。');
+
+        const r = await fetchProfile(targetUid);
+        if (!r.ok) return interaction.editReply(DB_SLOW_MSG);
+        const profile = r.data;
+        const hit = listCharacters(profile).find(c => c.idx === idx);
+        if (!hit) return interaction.editReply('❌ 找不到這隻角色，可能已經被刪掉了。');
+        if (hit.ign === newIgn) return interaction.editReply('💡 名字沒有變動。');
+
+        // 重名會讓等級批次更新那條路比對不出來（它是用角色名當 key 的）
+        const clash = listCharacters(profile)
+          .some(c => c.idx !== idx && c.ign.toLowerCase() === newIgn.toLowerCase());
+        if (clash) return interaction.editReply(`❌ 名冊裡已經有「${mdSafe(newIgn)}」了，不能重複。`);
+
+        const payload = { userId: targetUid };
+        if (idx === -1) {
+          payload.mainIgn = newIgn;
+        } else {
+          const subs = (profile.subs || []).map(s => ({ ...s }));
+          if (!subs[idx]) return interaction.editReply('❌ 找不到這隻分身，可能已經被刪掉了。');
+          subs[idx].ign = newIgn;
+          if (subs[idx].raw) subs[idx].raw = `${newIgn}/${subs[idx].job}/${subs[idx].level}`;
+          payload.subs = subs;
+        }
+
+        // merge 一定要加：不加的話整份文件被換掉，突襲進度那些沒列到的欄位會蒸發
+        await db.collection('member_profiles').doc(targetUid).set(payload, { merge: true });
+        invalidateProfile(targetUid);
+
+        return await interaction.editReply(
+          `✅ 已改名：\`${codeSafe(hit.ign)}\` ➔ \`${codeSafe(newIgn)}\`（${hit.isMain ? '本尊' : '分身'}　${hit.job} Lv.${hit.level}，職業與等級沒有變動）`
+          + (targetUid !== interaction.user.id ? `\n👮 這是幫 <@${targetUid}> 改的。` : '')
+          + '\n*提醒：已經結算過的排班表、賭局報告存的是當時的名字，不會跟著改。*'
         );
       }
 
@@ -4448,11 +4806,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   } catch (err) {
     console.error('互動處理錯誤:', err);
+    // 千萬不要在這裡叫人「重試」。能走到這裡代表程式在中途爆掉，
+    // 而資料庫的寫入通常已經成功了（下注、登記都是先寫再回覆），
+    // 叫人重試＝叫人下注兩次。只能請他先去確認。
+    const MSG = '⚠️ 這一步出了狀況，但你的動作**可能已經完成了**。\n'
+      + '請先按面板上的「🔄 即時更新」確認，**不要直接重試**，以免重複送出。';
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({ content: '❌ 處理超時或發生異常，請重試！' }).catch(() => {});
+        await interaction.editReply({ content: MSG }).catch(() => {});
       } else if (interaction.isRepliable()) {
-        await interaction.reply({ content: '❌ 處理失敗，請重試！', flags: MessageFlags.Ephemeral }).catch(() => {});
+        await interaction.reply({ content: MSG, flags: MessageFlags.Ephemeral }).catch(() => {});
       }
     } catch {}
   }
@@ -4594,6 +4957,7 @@ function buildMyCardPayload(d) {
     new ButtonBuilder().setCustomId('btn_trigger_wizard_main').setLabel('📝 報到/更新').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('card_btn_update_level').setLabel('🆙 更新等級').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('card_btn_add_char').setLabel('➕ 新增分身').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('card_btn_rename_char').setLabel('✏️ 改角色名').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('card_btn_delete_char').setLabel('🗑️ 刪除分身').setStyle(ButtonStyle.Danger)
   );
   const row2 = new ActionRowBuilder().addComponents(
@@ -4637,6 +5001,22 @@ function listCharacters(profile) {
     if (sub?.ign) out.push({ ign: sub.ign, job: sub.job || '冒險家', level: sub.level || '1', isMain: false, idx: i });
   });
   return out;
+}
+
+// 改名的選角色清單。本尊用 idx -1，分身用它在 subs 裡的位置。
+// 選項值只放 uid 與索引，不放角色名 —— 角色名可能含底線、也可能撐破 100 字上限。
+function buildRenamePickRow(targetUid, profile) {
+  const chars = listCharacters(profile).slice(0, 25);
+  if (!chars.length) return null;
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('select_char_to_rename')
+      .setPlaceholder('✏️ 選擇要改名的角色')
+      .addOptions(chars.map(c => new StringSelectMenuOptionBuilder()
+        .setLabel(`${c.isMain ? '👑' : '⚔️'} ${c.ign}`.substring(0, 100))
+        .setDescription(`${c.isMain ? '本尊' : '分身'}　${c.job} Lv.${c.level}`.substring(0, 100))
+        .setValue(`ren_${targetUid}_${c.idx}`)))
+  );
 }
 
 // 建立「一次改完」的表單，舊等級直接預填好
@@ -4930,7 +5310,7 @@ async function buildRaidAdminOverview(nowMs = Date.now()) {
 // ===================== 熱門地圖排隊（輪流接圖排班表） =====================
 const ROT_SPAN_HOURS = 48;          // 預設涵蓋 48 小時，開表時可自訂
 const ROT_MIN_SPAN_H = 1, ROT_MAX_SPAN_H = 48;    // 1 ~ 48 小時
-const ROT_SPLIT_EVEN = 'even', ROT_SPLIT_TIME = 'time';
+const ROT_SPLIT_EVEN = 'even', ROT_SPLIT_TIME = 'time', ROT_SPLIT_NONE = 'none';
 const ROT_MAX_PER_SLOT = 5;         // 團練時同一格最多幾個人
 const ROT_BACKFILL_MS = 12 * 3600000;   // 只填 HH:mm 時，往前 12 小時內都算今天
 const ROT_SLOT_MIN = 30;            // 一格固定 30 分鐘（不開放自訂）
@@ -5181,7 +5561,7 @@ function rotRenderGrid(rot, nowMs = Date.now()) {
         let j = i;
         while (j < rows.length && emptyRow(rows[j])) j++;
         if (j - i >= 2) {
-          t += `\u001b[30m${padCell('  ⋯', TIME_W)}（${j - i} 列全空）\u001b[0m\n`;
+          t += `\u001b[30m${padCell('  ⋯', CELL_W)}（${j - i} 列全空）\u001b[0m\n`;
           i = j; lines++; continue;
         }
       }
@@ -5298,7 +5678,24 @@ function rotParticipants(rot, nowMs = Date.now()) {
   return [...byUser.values()].sort((a, b) => b.slots - a.slots || a.ign.localeCompare(b.ign));
 }
 
-function rotSplitLabel(mode) { return mode === ROT_SPLIT_TIME ? '按時間攤' : '均攤'; }
+function rotSplitLabel(mode) {
+  if (mode === ROT_SPLIT_TIME) return '按時間攤';
+  if (mode === ROT_SPLIT_NONE) return '不分攤';
+  return '均攤';
+}
+
+// 分攤方式是用文字欄位填的（表單欄位已經用滿，塞不下選單），所以要寬鬆一點。
+function rotParseSplitMode(raw, fallback = ROT_SPLIT_EVEN) {
+  const s = String(raw || '').trim();
+  if (!s) return fallback;
+  if (/不分|不收|免費|不用付|我出|自己出|none/i.test(s)) return ROT_SPLIT_NONE;
+  if (/時間|time|比例/i.test(s)) return ROT_SPLIT_TIME;
+  return ROT_SPLIT_EVEN;
+}
+
+// 價格「填了 0」跟「還沒填」是兩回事：前者是免費團，後者要繼續提醒去填。
+// 舊的排班表沒有 priceSet 欄位，有價格的就當作填過了（跟以前的行為一致）。
+function rotPriceSet(rot) { return rot?.priceSet === true || (rot?.buyPrice || 0) > 0; }
 
 // 一次把一個人寫進多個格子。整批共用一次交易：讀一次、算完再一起寫。
 // 寫不進去的格子不丟錯，而是收進 skipped 回報 —— 補登一整晚的班時，
@@ -5593,7 +5990,9 @@ function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
       + (profit ? `**轉手賺 ${formatMeso(-net)}**` : `**淨成本 ${formatMeso(net)}**`)
     : `買圖 **${formatMeso(rot.buyPrice)}**（沒有賣出）`;
 
-  if (profit && !shareProfit) {
+  const noSplit = rot.splitMode === ROT_SPLIT_NONE;
+
+  if (profit && !shareProfit && !noSplit) {
     return {
       embed: new EmbedBuilder().setColor(0x57F287).setTitle(header)
         .setDescription(
@@ -5606,7 +6005,10 @@ function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
     };
   }
 
-  const rowsWithAmt = rotSplitAmount(net, parts, rot.splitMode);
+  // 不分攤：還是把參與者列出來當出席紀錄，但金額一律 0
+  const rowsWithAmt = noSplit
+    ? parts.map(p => ({ ...p, amount: 0 }))
+    : rotSplitAmount(net, parts, rot.splitMode);
   const totalSlots = parts.reduce((a, p) => a + p.slots, 0) || 1;
   // 下限 6 是「參與者」三個字的寬度，不留這個下限表頭會跟時段欄黏在一起
   const nameW = Math.min(14, Math.max(6, ...rowsWithAmt.map(r => dispWidth(r.ign))));
@@ -5614,7 +6016,7 @@ function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
   const byTime = rot.splitMode === ROT_SPLIT_TIME;
 
   let body = '\u001b[1;36m ' + padCell('參與者', nameW + 2) + padCell('時段', 13)
-    + (profit ? '應領' : '應付') + '\u001b[0m\n';
+    + (noSplit ? '應付' : profit ? '應領' : '應付') + '\u001b[0m\n';
   rowsWithAmt.forEach(r => {
     const pct = (r.slots / totalSlots * 100).toFixed(1);
     body += ` ${padCell(r.ign, nameW + 2)}${padCell(`${fmtSlots(r.slots)} 格 ${pct}%`, 13)}`
@@ -5630,21 +6032,26 @@ function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
     ? `${profit ? '轉手利潤' : '淨成本'} ＝ 買 ${formatMeso(rot.buyPrice)} − 賣 ${formatMeso(rot.sellPrice)} ＝ **${formatMeso(abs)}**`
     : `淨成本 ＝ 買圖 **${formatMeso(rot.buyPrice)}**（沒有賣出）`);
   const sharedCount = parts.reduce((a, p) => a + (p.shared || 0), 0);
-  steps.push(byTime
-    ? `計費時段合計 ＝ **${fmtSlots(totalSlots)} 格**`
-      + (sharedCount ? `（團練格一格算 1÷人數，全場有 ${sharedCount} 人次是團練）` : '')
-    : `分攤人數 ＝ **${parts.length} 人**`);
+  steps.push(noSplit
+    ? `分攤方式 ＝ **不分攤**，整筆由墊付人 <@${rotPayerId(rot)}> 負擔，**沒有人要付錢**`
+    : byTime
+      ? `計費時段合計 ＝ **${fmtSlots(totalSlots)} 格**`
+        + (sharedCount ? `（團練格一格算 1÷人數，全場有 ${sharedCount} 人次是團練）` : '')
+      : `分攤人數 ＝ **${parts.length} 人**`);
 
   const detail = rowsWithAmt.map(r => {
+    const sharedTag = r.shared ? `（站 ${r.raw} 格，其中 ${r.shared} 格團練）` : '';
+    if (noSplit) return `‧ ${r.ign}：${fmtSlots(r.slots)} 格 —— **不收費**${sharedTag}`;
     const mine = byTime
       ? `${fmtSlots(r.slots)} 格 ÷ ${fmtSlots(totalSlots)} 格 × ${formatMeso(abs)}`
       : `${formatMeso(abs)} ÷ ${parts.length} 人`;
-    const sharedTag = r.shared ? `（站 ${r.raw} 格，其中 ${r.shared} 格團練）` : '';
     return `‧ ${r.ign}：${mine} ＝ **${formatMeso(Math.abs(r.amount))}**${sharedTag}`;
   });
 
-  const exact = rowsWithAmt.reduce((a, r) => a + Math.abs(r.amount), 0);
-  if (exact !== abs) detail.push(`‧ 進位零頭 ${Math.abs(abs - exact)} 已併入最後一位`);
+  if (!noSplit) {
+    const exact = rowsWithAmt.reduce((a, r) => a + Math.abs(r.amount), 0);
+    if (exact !== abs) detail.push(`‧ 進位零頭 ${Math.abs(abs - exact)} 已併入最後一位`);
+  }
 
   const payerId = rotPayerId(rot);
   const collectorId = rotCollectorId(rot);
@@ -5653,10 +6060,14 @@ function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
   const collect = abs - (ownerRow ? Math.abs(ownerRow.amount) : 0);
   const table = '```ansi\n' + body + '```';
   // 錢一律直接匯給墊付人（他出的錢他收回），收款人只負責催收、對帳
-  const action = (profit
+  const action = noSplit
+    ? (profit
+      ? `🙅 本次**不分攤**：這趟轉手賺了 **${formatMeso(abs)}**，全歸 <@${payerId}>。大家不用付錢，也不分錢。`
+      : `🙅 本次**不分攤**：費用 **${formatMeso(abs)}** 由 <@${payerId}> 全額負擔，**大家都不用付錢**。`)
+    : (profit
     ? `<@${payerId}> 請把上面的金額**發給**每一位（自己那份留著），共需發出 **${formatMeso(collect)}**。`
     : `請把上面的金額**匯給** <@${payerId}>。他自己那份不用匯，實際可收回 **${formatMeso(collect)}**。`)
-    + (rotHasSeparateCollector(rot)
+    + ((rotHasSeparateCollector(rot) && !noSplit)
       ? `\n🧾 對帳、催收由 <@${collectorId}> 負責（錢不用經過他，直接給 <@${payerId}> 就好）。`
       : '');
 
@@ -5730,15 +6141,18 @@ function buildRotationEmbed(rot, nowMs = Date.now()) {
     : '';
   const pending = [];
   if (!(rot.channelNum > 0)) pending.push('頻道');
-  if (!(rot.buyPrice > 0)) pending.push('買圖價格');
+  if (!rotPriceSet(rot)) pending.push('買圖價格');
   const todo = (pending.length && !rot.isClosed)
     ? `⚠️ 尚未填：**${pending.join('、')}**（頻道用 📺 改頻道，價格用 ✏️ 修改內容）\n`
     : '';
 
   // 墊付與收款永遠分兩個欄位寫，就算是同一個人也一樣 —— 合併顯示會讓人忘記這是兩個角色
-  const money = rot.buyPrice > 0
-    ? `💰 買圖 **${formatMeso(rot.buyPrice)}**（${rotSplitLabel(rot.splitMode)}）\n`
-      + `　　墊付：<@${rotPayerId(rot)}>；收款：<@${rotCollectorId(rot)}>\n`
+  // 價格填了就寫出來，就算是 0 也一樣 —— 整行消失會讓人以為系統沒吃到
+  const money = rotPriceSet(rot)
+    ? `💰 買圖 **${formatMeso(rot.buyPrice || 0)}**`
+      + (rot.buyPrice > 0
+        ? `（${rotSplitLabel(rot.splitMode)}）\n　　墊付：<@${rotPayerId(rot)}>；收款：<@${rotCollectorId(rot)}>\n`
+        : '（**免費團**，不跟大家收錢）\n')
     : '';
 
   const embed = new EmbedBuilder()

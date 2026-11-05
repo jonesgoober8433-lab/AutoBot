@@ -489,8 +489,13 @@ function rosterNickname(profile) {
   const nick = String(profile?.nickname || '').trim();
   const lv = String(profile?.mainLevel || '').trim();
   const job = String(profile?.mainJob || '').trim();
-  if (!nick && !lv && !job) return '';
-  return `${nick}[${lv}_${job}]`.substring(0, 32);
+  // 三樣缺一樣就不組。以前綽號空白時會組出「[187_黑騎士]」這種開頭是方括號的暱稱，
+  // 看起來像名字被清空；寧可回空字串讓呼叫端講出原因，也不要寫進一個怪名字。
+  if (!nick || !lv || !job) return '';
+  const tail = `[${lv}_${job}]`;
+  // 超長時截的是綽號，不是尾巴 —— 整串硬切 32 字會把「]」切掉
+  const head = [...nick].slice(0, Math.max(1, 32 - tail.length)).join('');
+  return `${head}${tail}`.substring(0, 32);
 }
 
 // 改暱稱很常失敗，而 Discord 只會回一句「Missing Permissions」，查不出是哪一種。
@@ -499,7 +504,7 @@ function rosterNickname(profile) {
 async function applyNickname(guild, userId, nick) {
   const name = String(nick || '').trim().substring(0, 32);
   if (!guild) return { ok: false, reason: '讀不到伺服器資料' };
-  if (!name) return { ok: false, reason: '算出來的暱稱是空的（綽號、等級、職業都沒填）' };
+  if (!name) return { ok: false, reason: '名冊裡缺綽號、等級或本尊職業，組不出暱稱（請他按「🏷️ 補填暱稱」填綽號，或用 /名冊 報到）' };
 
   const member = await guild.members.fetch(userId).catch(() => null);
   if (!member) return { ok: false, reason: '這個人已經不在伺服器裡' };
@@ -971,7 +976,8 @@ const commands = [
         { name: '📌 張貼公開的「報到登記面板」到本頻道', value: 'ADMIN_POST_REGISTER' },
         { name: '⚔️ 查看全體成員的突襲王進度', value: 'ADMIN_RAID_OVERVIEW' },
         { name: '🩺 一鍵修正超出範圍的等級 (夾回 1~200)', value: 'ADMIN_FIX_LEVELS' },
-        { name: '🏷️ 一鍵重排全公會的伺服器暱稱 (綽號[等級_職業])', value: 'ADMIN_RESYNC_NICKS' }
+        { name: '🏷️ 一鍵重排全公會的伺服器暱稱 (綽號[等級_職業])', value: 'ADMIN_RESYNC_NICKS' },
+        { name: '🔎 張貼「暱稱補填」面板＋列出暱稱不對的人', value: 'ADMIN_POST_NICK_FIX' }
       )
     )
     .addUserOption(o => o.setName('對象成員').setDescription('代填名冊時選擇對象成員 (@成員)').setRequired(false))
@@ -1659,6 +1665,64 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return await interaction.editReply({ embeds: [embed] });
         }
 
+        // 🔎 暱稱補填：公開貼一個按鈕讓大家自己填綽號，並私下列出「現在暱稱不對」的人給管理員看。
+        // 不會 tag 任何人，也不會動任何人的暱稱 —— 要強制重排請用上面的「一鍵重排」。
+        if (mode === 'ADMIN_POST_NICK_FIX') {
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+          const guild = interaction.guild;
+          const snap = await db.collection('member_profiles').get();
+          const members = await guild.members.fetch();
+          const blank = [], wrong = [], noNick = [];
+          let okCount = 0, skipped = 0;
+
+          snap.forEach(docSnap => {
+            const d = docSnap.data();
+            if (!d.mainIgn) return;
+            const m = members.get(docSnap.id);
+            if (!m) { skipped++; return; }          // 已退群，不用管
+            const want = rosterNickname(d);
+            if (!want) { noNick.push(`• <@${docSnap.id}>（名冊缺綽號、等級或職業）`); return; }
+            if (m.nickname === want) { okCount++; return; }
+            const line = `• <@${docSnap.id}>　目前「${codeSafe(m.nickname || '空白')}」 ➔ \`${codeSafe(want)}\``;
+            (m.nickname ? wrong : blank).push(line);
+          });
+
+          let panelNote = '';
+          try {
+            const ch = interaction.channel;
+            if (!ch?.isTextBased()) throw new Error('這裡不能發訊息');
+            await ch.send({
+              embeds: [new EmbedBuilder()
+                .setColor(0x57F287)
+                .setTitle('🏷️【伺服器暱稱補填】')
+                .setDescription(
+                  '你的伺服器暱稱還不是 `綽號[等級_職業]` 的格式嗎？\n'
+                  + '按下面的按鈕**填一個綽號**，機器人會依你名冊裡的**等級與本尊職業**自動組好、改好。\n'
+                  + '‧ 綽號請填你想被大家叫的名字，**不要**填 Discord 帳號名\n'
+                  + '‧ 還沒報到過的人，請先用 `/名冊` 報到'
+                )],
+              components: [new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('btn_nick_fix').setLabel('🏷️ 補填暱稱').setStyle(ButtonStyle.Success)
+              )]
+            });
+            panelNote = '✅ 面板已貼到本頻道。';
+          } catch (e) {
+            console.error('張貼暱稱補填面板失敗:', e.message);
+            panelNote = `❌ 面板貼不出去：${e.message}（機器人可能沒有這個頻道的發言權限）`;
+          }
+
+          const section = (title, arr) => arr.length
+            ? `\n**${title}（${arr.length}）**\n${arr.slice(0, 12).join('\n')}${arr.length > 12 ? `\n…還有 ${arr.length - 12} 位` : ''}`
+            : '';
+          let out = `${panelNote}\n暱稱正確 **${okCount}** 位${skipped ? `　‧　已退群略過 ${skipped} 位` : ''}`
+            + section('暱稱是空白（從沒被設定過）', blank)
+            + section('暱稱跟名冊不一致', wrong)
+            + section('名冊資料不完整，組不出暱稱', noNick)
+            + '\n\n💡 想直接強制改回去，用「🏷️ 一鍵重排全公會的伺服器暱稱」；它用的是名冊裡的綽號，綽號是帳號名的人會被改成帳號名，所以建議先讓大家按面板填綽號。';
+          if (out.length > 1900) out = out.slice(0, 1880) + '\n…（太長已截斷）';
+          return await interaction.editReply(out);
+        }
+
         if (mode === 'ADMIN_RESYNC_NICKS') {
           await interaction.deferReply({ flags: MessageFlags.Ephemeral });
           const snap = await db.collection('member_profiles').get();
@@ -1779,6 +1843,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const customId = interaction.customId;
 
       // 2. 報到精靈
+      // 🏷️ 補填暱稱：只問綽號，等級與職業一律用名冊裡的。
+      // 要 showModal 所以不能先 defer，讀取走快取版。預設值刻意不帶 Discord 帳號名，
+      // 不然大家直接按送出，綽號又全變成帳號名。
+      if (customId === 'btn_nick_fix') {
+        const r = await fetchProfileFast(interaction.user.id);
+        if (!r.ok) return interaction.reply({ content: DB_SLOW_MSG, flags: MessageFlags.Ephemeral });
+        const p = r.data;
+        if (!p.mainIgn || !p.mainJob || !p.mainLevel) {
+          return interaction.reply({ content: '📜 你還沒有完整的名冊資料，請先用 `/名冊` 報到，報到完暱稱會自動設好。', flags: MessageFlags.Ephemeral });
+        }
+        const tail = `[${p.mainLevel}_${p.mainJob}]`;
+        const input = new TextInputBuilder()
+          .setCustomId('nick_value')
+          .setLabel(`綽號（會變成 綽號${tail}）`.substring(0, 45))
+          .setPlaceholder('填你想被大家叫的名字')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(Math.max(1, Math.min(30, 32 - tail.length)));
+        if (p.nickname && p.nickname !== interaction.user.username) input.setValue(String(p.nickname).substring(0, 30));
+        return await interaction.showModal(
+          new ModalBuilder().setCustomId('modal_nick_fix').setTitle('補填伺服器暱稱').addComponents(new ActionRowBuilder().addComponents(input))
+        );
+      }
+
       if (customId === 'btn_trigger_wizard_main') {
         const prev = (await fetchProfileFast(interaction.user.id)).data;
         wizardSessionMap.set(interaction.user.id, {
@@ -3901,6 +3989,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ----------------------------------------
     if (interaction.isModalSubmit()) {
       const customId = interaction.customId;
+
+      // 🏷️ 補填暱稱提交：只動綽號這一個欄位（merge），再套用 綽號[等級_職業]
+      if (customId === 'modal_nick_fix') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const r = await fetchProfile(interaction.user.id);
+        if (!r.ok) return interaction.editReply(DB_SLOW_MSG);
+        const p = r.data;
+        if (!p.mainIgn || !p.mainJob || !p.mainLevel) {
+          return interaction.editReply('📜 你還沒有完整的名冊資料，請先用 `/名冊` 報到。');
+        }
+        // 有人會連方括號一起打進來（阿明[187_黑騎士]），先拿掉免得變成兩層
+        const nickname = String(interaction.fields.getTextInputValue('nick_value') || '')
+          .replace(/\[[^\]]*\]/g, '').trim();
+        if (!nickname) return interaction.editReply('❌ 綽號不能是空的，也不要只填方括號裡的內容。');
+
+        const tail = `[${p.mainLevel}_${p.mainJob}]`;
+        const maxLen = 32 - tail.length;
+        if ([...nickname].length > maxLen) {
+          return interaction.editReply(`❌ 綽號太長了。你的暱稱尾巴是 \`${tail}\`，綽號最多 **${maxLen}** 個字，你填了 ${[...nickname].length} 個。`);
+        }
+
+        // merge 一定要加，不然整份名冊被換掉，突襲進度會蒸發
+        await db.collection('member_profiles').doc(interaction.user.id).set(
+          { userId: interaction.user.id, nickname }, { merge: true }
+        );
+        invalidateProfile(interaction.user.id);
+
+        const res = await applyNickname(interaction.guild, interaction.user.id, rosterNickname({ ...p, nickname }));
+        return await interaction.editReply(res.ok
+          ? `✅ 綽號已存好，伺服器暱稱現在是 \`${codeSafe(res.name)}\`。`
+          : `✅ 綽號已存進名冊（\`${codeSafe(nickname)}\`）。\n⚠️ 但**伺服器暱稱沒改成功**：${res.reason}`);
+      }
 
       // 4. 報到精靈提交
       if (customId === 'modal_wizard_step1_main') {

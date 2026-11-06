@@ -977,7 +977,8 @@ const commands = [
         { name: '⚔️ 查看全體成員的突襲王進度', value: 'ADMIN_RAID_OVERVIEW' },
         { name: '🩺 一鍵修正超出範圍的等級 (夾回 1~200)', value: 'ADMIN_FIX_LEVELS' },
         { name: '🏷️ 一鍵重排全公會的伺服器暱稱 (綽號[等級_職業])', value: 'ADMIN_RESYNC_NICKS' },
-        { name: '🔎 張貼「暱稱補填」面板＋列出暱稱不對的人', value: 'ADMIN_POST_NICK_FIX' }
+        { name: '🔎 張貼「暱稱補填」面板＋列出暱稱不對的人', value: 'ADMIN_POST_NICK_FIX' },
+        { name: '📢 管理自動廣播（查看／開關／改時間／新增／刪除）', value: 'ADMIN_BROADCASTS' }
       )
     )
     .addUserOption(o => o.setName('對象成員').setDescription('代填名冊時選擇對象成員 (@成員)').setRequired(false))
@@ -1082,86 +1083,9 @@ client.once(Events.ClientReady, async () => {
     } catch (e) { console.error('15分鐘定時巡檢異常:', e.message); }
   });
 
-  // 199等倒數廣播
-  cron.schedule('0 0 8 * * *', async () => {
-    try {
-      const channel = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
-      if (!channel?.isTextBased()) return;
-      if (db) {
-        // 只用 mainLevel 篩選。原本多帶 where('isRetired','==',false)，但 Firestore 的
-        // == false 要求欄位存在，沒寫過這欄位的人會被整個漏掉，等於收不到倒數推播。
-        const snap = await db.collection('member_profiles').where('mainLevel', '==', '199').get();
-        if (!snap.empty) {
-          const now = Date.now();
-          const countdownTexts = [];
-          snap.forEach(doc => {
-            const data = doc.data();
-            const start = data.reach199At ? data.reach199At.toMillis() : now;
-            const days = Math.floor((now - start) / (1000 * 60 * 60 * 24)) + 1;
-            countdownTexts.push(`🔥 <@${data.userId}>（\`${data.nickname || ''}[${data.mainLevel}_${data.mainJob}]\`）邁向 200 等修煉：**第 ${days} 天**！`);
-          });
-          if (countdownTexts.length) {
-            const embed199 = new EmbedBuilder().setColor(0xE74C3C).setTitle('⏳【即將登頂 200 等】巔峰修煉倒數').setDescription(countdownTexts.join('\n'));
-            await channel.send({ embeds: [embed199] }).catch(() => {});
-          }
-        }
-      }
-    } catch (e) { console.error('199廣播異常:', e.message); }
-  }, { timezone: 'Asia/Taipei' });
-
-  // 週一突襲
-  cron.schedule('0 0 9 * * 1', async () => {
-    try {
-      const ch = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
-      if (ch && ch.isTextBased()) {
-        const embed = new EmbedBuilder()
-          .setColor(0xE74C3C)
-          .setTitle('🔔【每週例行提醒】突襲遠征結算倒數')
-          .setDescription(
-            '週二 08:00 維護後次數就歸零了，請把握時間打完突襲王！\n' +
-            '點下面的按鈕可以看**自己每一隻角色**還差幾次（只有你看得到）。'
-          );
-        const raidRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('btn_raid_self').setLabel('⚔️ 看我的突襲進度').setStyle(ButtonStyle.Primary)
-        );
-        await ch.send({ embeds: [embed], components: [raidRow] }).catch(() => {});
-      }
-    } catch (e) { console.error('週一廣播異常:', e.message); }
-  }, { timezone: 'Asia/Taipei' });
-
-  // 週二名冊廣播
-  const sendTuesdayBroadcast = async () => {
-    try {
-      const ch = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
-      if (ch && ch.isTextBased()) {
-        const embed = new EmbedBuilder()
-          .setColor(0x5865F2)
-          .setTitle('🔔【每週名冊維護】請大家更新角色資訊唷！')
-          .setDescription('點擊下方按鈕將**自動帶入您所有角色的目前等級**，只要改數字就完成更新！\n新增／刪除角色請用 `/名冊`。');
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('btn_batch_level_self').setLabel('🆙 一次更新所有角色等級').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId('btn_trigger_wizard_main').setLabel('📝 重新報到 / 加分身').setStyle(ButtonStyle.Secondary)
-        );
-        await ch.send({ embeds: [embed], components: [row] }).catch(() => {});
-      }
-    } catch (e) { console.error('週二廣播異常:', e.message); }
-  };
-
-  // 每晚 23:00：提醒大家更新突襲進度（不帶統計、不點名）
-  cron.schedule('0 0 23 * * *', async () => {
-    try {
-      const ch = await client.channels.fetch(REPORT_CHANNEL_ID).catch(() => null);
-      if (!ch?.isTextBased()) return;
-      const embed = new EmbedBuilder()
-        .setColor(0x5865F2)
-        .setTitle('🌙【睡前確認】今天的突襲王打完了嗎？')
-        .setDescription('點下面的按鈕看自己每一隻角色還差幾次，順手把今天打的記上去。\n只有你看得到，不會洗頻。');
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('btn_raid_self').setLabel('⚔️ 看我的突襲進度').setStyle(ButtonStyle.Primary)
-      );
-      await ch.send({ embeds: [embed], components: [row] }).catch(() => {});
-    } catch (e) { console.error('23:00 突襲提醒異常:', e.message); }
-  }, { timezone: 'Asia/Taipei' });
+  // 公開廣播（199 倒數、週一突襲、週二名冊、每晚突襲提醒＋自訂廣播）
+  // 已改成由 initBroadcasts() 依 Firestore 設定排程，管理員可用「📢 管理自動廣播」開關、改時間、新增、刪除。
+  await initBroadcasts();
 
   // 每分鐘：熱門地圖排隊的換班提醒、30 分鐘預告、空格求援
   cron.schedule('* * * * *', async () => {
@@ -1293,8 +1217,6 @@ client.once(Events.ClientReady, async () => {
     } catch (e) { console.error('清理排班表異常:', e.message); }
   }, { timezone: 'Asia/Taipei' });
 
-  cron.schedule('0 0 9 * * 2', sendTuesdayBroadcast, { timezone: 'Asia/Taipei' });
-  cron.schedule('0 0 19 * * 2', sendTuesdayBroadcast, { timezone: 'Asia/Taipei' });
 });
 
 client.on(Events.GuildMemberAdd, async (member) => {
@@ -1535,7 +1457,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
               `6. ⚔️ **查看全體突襲王進度** (\`/管理員功能 模式:全體突襲進度\`)\n` +
               `7. 🩺 **一鍵修正超出範圍的等級** (\`/管理員功能 模式:一鍵修正等級\`)\n` +
               `8. 🏷️ **一鍵重排全公會伺服器暱稱** —— 照名冊把每個人的暱稱重新套成 \`綽號[等級_職業]\`，改不動的會列出原因\n` +
-              `8. 🚪 **強制刪除揪團 / 廢除賭局**`
+              `9. 🔎 **張貼暱稱補填面板** —— 公開貼一個按鈕讓成員自己填綽號，並私下列出暱稱不對的人\n` +
+              `10. 📢 **管理自動廣播** —— 查看所有自動廣播，開關、改時間與頻道、新增自訂廣播、刪除自訂廣播\n` +
+              `11. 🚪 **強制刪除揪團 / 廢除賭局**`
             );
           return await interaction.reply({ embeds: [helpEmbed], flags: MessageFlags.Ephemeral });
         }
@@ -1663,6 +1587,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 : '')
             );
           return await interaction.editReply({ embeds: [embed] });
+        }
+
+        if (mode === 'ADMIN_BROADCASTS') {
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+          await initBroadcasts();       // 重新讀設定，面板看到的一定是最新的
+          return await interaction.editReply(bcPanelPayload());
         }
 
         // 🔎 暱稱補填：公開貼一個按鈕讓大家自己填綽號，並私下列出「現在暱稱不對」的人給管理員看。
@@ -1843,6 +1773,122 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const customId = interaction.customId;
 
       // 2. 報到精靈
+      // 📢 自動廣播管理（僅超級管理員）
+      if (customId.startsWith('bc_')) {
+        if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.reply({ content: '❌ 僅超級管理員可使用！', flags: MessageFlags.Ephemeral });
+        }
+
+        // 要跳表單的幾顆：showModal 前不能 defer，所以只讀記憶體裡的清單
+        if (customId === 'bc_add') {
+          if (BC_LIST.filter(x => x.custom).length >= BC_MAX_CUSTOM) {
+            return interaction.reply({ content: `❌ 自訂廣播最多 ${BC_MAX_CUSTOM} 個，請先刪掉不用的。`, flags: MessageFlags.Ephemeral });
+          }
+          const modal = new ModalBuilder().setCustomId('modal_bc_add').setTitle('新增自訂廣播');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('bc_name').setLabel('名稱（只有管理員看得到）')
+              .setPlaceholder('例如：週五揪團提醒').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(40)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('bc_text').setLabel('廣播內容（會原文發出去）')
+              .setPlaceholder('可以 @身分組、換行；@everyone／@here 不會生效').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1800)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('bc_days').setLabel('星期（每天／一三五／平日／假日）')
+              .setValue('每天').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(30)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('bc_times').setLabel('時間（台北時間，多個用逗號）')
+              .setPlaceholder('例如 20:00　或　09:00,19:00').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(40)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('bc_chan').setLabel('頻道 ID（留空＝公告頻道）')
+              .setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(30))
+          );
+          return await interaction.showModal(modal);
+        }
+
+        if (customId.startsWith('bc_sched_')) {
+          const e = BC_LIST.find(x => x.key === customId.replace('bc_sched_', ''));
+          if (!e) return interaction.reply({ content: '❌ 找不到這個廣播，請重新開啟面板。', flags: MessageFlags.Ephemeral });
+          const modal = new ModalBuilder().setCustomId(`modal_bc_sched_${e.key}`).setTitle('改時間／頻道'.slice(0, 45));
+          const chanInput = new TextInputBuilder().setCustomId('bc_chan').setLabel('頻道 ID（留空＝公告頻道）')
+            .setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(30);
+          if (e.channelId) chanInput.setValue(e.channelId);
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('bc_days').setLabel('星期（每天／一三五／平日／假日）')
+              .setValue(e.days.length ? e.days.map(d => BC_DAY_NAMES[d]).join('') : '每天').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(30)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('bc_times').setLabel('時間（台北時間，多個用逗號）')
+              .setValue(e.times.join(',')).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(40)),
+            new ActionRowBuilder().addComponents(chanInput)
+          );
+          return await interaction.showModal(modal);
+        }
+
+        if (customId.startsWith('bc_text_')) {
+          const e = BC_LIST.find(x => x.key === customId.replace('bc_text_', ''));
+          if (!e || !e.custom) return interaction.reply({ content: '❌ 只有自訂廣播可以改內容。', flags: MessageFlags.Ephemeral });
+          const modal = new ModalBuilder().setCustomId(`modal_bc_text_${e.key}`).setTitle('改廣播內容');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('bc_name').setLabel('名稱')
+              .setValue(e.name.slice(0, 40)).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(40)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('bc_text').setLabel('廣播內容')
+              .setValue((e.text || '').slice(0, 1800)).setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1800))
+          );
+          return await interaction.showModal(modal);
+        }
+
+        // 現在發一次：會真的發到頻道，所以回覆要講清楚發去哪、成不成功
+        if (customId.startsWith('bc_test_')) {
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+          const e = BC_LIST.find(x => x.key === customId.replace('bc_test_', ''));
+          if (!e) return await interaction.editReply('❌ 找不到這個廣播，請重新開啟面板。');
+          const r = await bcRunEntry(e);
+          return await interaction.editReply(r.ok
+            ? `✅ ${r.note || `已把「${e.name}」發到 <#${e.channelId || REPORT_CHANNEL_ID}>。`}`
+            : `❌ 沒發成功：${r.reason}`);
+        }
+
+        // 以下都是改完要重畫面板：先 ack，再寫入、重建排程、重畫
+        await interaction.deferUpdate();
+
+        if (customId === 'bc_back' || customId === 'bc_refresh') {
+          await initBroadcasts();
+          return await interaction.editReply(bcPanelPayload());
+        }
+
+        if (customId.startsWith('bc_open_')) {
+          return await interaction.editReply(bcDetailPayload(customId.replace('bc_open_', '')));
+        }
+
+        if (customId.startsWith('bc_toggle_')) {
+          const key = customId.replace('bc_toggle_', '');
+          const e = BC_LIST.find(x => x.key === key);
+          if (!e) return await interaction.editReply(bcPanelPayload('❌ 找不到這個廣播，可能剛被刪掉了。'));
+          // merge：內建廣播第一次被設定時文件還不存在，要建出來，但不能蓋掉別的欄位
+          await db.collection(BC_COLLECTION).doc(key).set({ enabled: !e.enabled }, { merge: true });
+          await initBroadcasts();
+          return await interaction.editReply(bcDetailPayload(key, e.enabled ? '⏸️ 已關閉，之後不會再自動發送。' : '▶️ 已開啟。'));
+        }
+
+        if (customId.startsWith('bc_del_')) {
+          const key = customId.replace('bc_del_', '');
+          const e = BC_LIST.find(x => x.key === key);
+          if (!e || !e.custom) return await interaction.editReply(bcPanelPayload('❌ 只有自訂廣播可以刪除；內建廣播請用「關閉」。'));
+          return await interaction.editReply({
+            content: '',
+            embeds: [new EmbedBuilder().setColor(0xED4245).setTitle(`⚠️ 確定要刪除「${e.name}」嗎？`)
+              .setDescription(`排程：${bcSchedLabel(e)}\n\n刪除後**無法復原**，要再有就得重新新增。只是暫時不想發的話，請改按「⏸️ 關閉」。`)],
+            components: [new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId(`bc_delok_${key}`).setLabel('🗑️ 確定刪除').setStyle(ButtonStyle.Danger),
+              new ButtonBuilder().setCustomId(`bc_open_${key}`).setLabel('取消').setStyle(ButtonStyle.Secondary)
+            )]
+          });
+        }
+
+        if (customId.startsWith('bc_delok_')) {
+          const key = customId.replace('bc_delok_', '');
+          const e = BC_LIST.find(x => x.key === key);
+          if (!e || !e.custom) return await interaction.editReply(bcPanelPayload('❌ 找不到這個自訂廣播，可能已經刪掉了。'));
+          await db.collection(BC_COLLECTION).doc(key).delete();
+          await initBroadcasts();
+          return await interaction.editReply(bcPanelPayload(`🗑️ 已刪除「${e.name}」。`));
+        }
+        return;
+      }
+
       // 🏷️ 補填暱稱：只問綽號，等級與職業一律用名冊裡的。
       // 要 showModal 所以不能先 defer，讀取走快取版。預設值刻意不帶 Discord 帳號名，
       // 不然大家直接按送出，綽號又全變成帳號名。
@@ -2583,26 +2629,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // 外援常常是連顧好幾格。只能登記「現在這一格」的話，剩下的格子
         // 只能跑去按「✋ 我要接這段」—— 那條路一律記成付費成員，結算就錯了。
-        const curIdx = rotCurrentIndex(rot);
-        const { picked, dropped } = rotWindow(rotPickableIndexes(rot, interaction.user.id, Date.now(), true), curIdx, p => p.idx);
-        if (!picked.length) {
-          return await interaction.editReply('💡 目前沒有可以登記的時段（都滿了或你都排過了）。');
-        }
-        return await interaction.editReply({
-          content: '🆘 **外援顧圖**：勾選你顧的時段，**可以一次勾多段**，下一步再填角色名。\n'
-            + '*這些時段**不會跟你收錢**。⏪ 開頭的是已經過去的時段（補登）。*'
-            + (dropped ? `\n*可選時段太多，一次只放得下 ${picked.length} 個；剩下的 ${dropped} 個登記完再按一次就會出現。*` : ''),
-          components: [new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder().setCustomId(`rot_sosslot_${rotId}`)
-              .setPlaceholder(`選你顧的時段，可多選（最多 ${picked.length} 段）`)
-              .setMinValues(1).setMaxValues(picked.length)
-              .addOptions(picked.map(p => new StringSelectMenuOptionBuilder()
-                .setLabel(`${p.idx < curIdx ? '⏪ ' : ''}${rotSlotLabel(rot, p.idx)}${p.n ? `　🤝 併團(${p.n}人)` : ''}`.slice(0, 100))
-                .setDescription(`${rotDayLabel(rotSlotMs(rot, p.idx))}${p.idx < curIdx ? '　（補登）' : ''}`.slice(0, 100))
-                .setDefault(p.idx === curIdx)      // 預設先幫他勾好「現在這一格」
-                .setValue(String(p.idx))))
-          )]
-        });
+        // 分頁挑時段：表再長（48 小時）也每一格都挑得到
+        return await interaction.editReply(rotPickerPayload(rot, rotId, 's', interaction.user.id, null, null));
+      }
+
+      // ── ✋ 我要接這段／補登、❌ 取消時段：按下去才用分頁選單挑 ──
+      if (customId.startsWith('rot_pb_') || customId.startsWith('rot_db_')) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const mode = customId.startsWith('rot_pb_') ? 't' : 'd';
+        const rotId = customId.replace(mode === 't' ? 'rot_pb_' : 'rot_db_', '');
+        const doc = await db.collection('map_rotations').doc(rotId).get().catch(() => null);
+        if (!doc?.exists) return await interaction.editReply('❌ 這張排班表已經不存在了。');
+        const rot = doc.data();
+        if (mode === 't' && rot.isClosed) return await interaction.editReply('🚪 這張排班表已經結束了。');
+        const canForce = rot.creatorId === interaction.user.id
+          || isSuperAdmin(interaction.user.id, interaction.memberPermissions);
+        return await interaction.editReply(
+          rotPickerPayload(rot, rotId, mode, interaction.user.id, null, null, canForce)
+        );
       }
 
       // ── 🤝 團練開關 ──
@@ -3152,6 +3196,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isStringSelectMenu() || interaction.isUserSelectMenu()) {
       const customId = interaction.customId;
 
+      // 📢 自動廣播：選一個來管理
+      if (customId === 'bc_pick') {
+        if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.reply({ content: '❌ 僅超級管理員可使用！', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferUpdate();
+        return await interaction.editReply(bcDetailPayload(interaction.values[0]));
+      }
+
       // 快速登記：選到哪隻就幫那隻加次數，加完直接刷新同一個面板
       if (customId === 'raid_sel_plus7') {
         await interaction.deferUpdate();
@@ -3301,26 +3354,134 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return await interaction.followUp({ content: '❌ 你沒有代登記的權限。', flags: MessageFlags.Ephemeral });
         }
         const targetUid = interaction.values[0];
-        // 連已經過去的時段也列出來，才能補登「打完但忘了按」的班
-        const curIdx = rotCurrentIndex(rot);
-        const all = rotPickableIndexes(rot, targetUid, Date.now(), true);
-        const { picked: pick, dropped } = rotWindow(all, curIdx, p => p.idx);
-        if (!pick.length) {
-          return await interaction.editReply({ content: `💡 <@${targetUid}> 沒有可以登記的時段（都滿了或都排過了）。`, components: [] });
+        // 連已經過去的時段也列出來，才能補登「打完但忘了按」的班（分頁挑，見 rotPickerPayload）
+        return await interaction.editReply(rotPickerPayload(rot, rotId, 'x', interaction.user.id, targetUid, null));
+      }
+
+      // 分頁選單切換時間範圍（自己接／取消／外援／代登記共用）
+      if (customId.startsWith('rot_pg_')) {
+        await interaction.deferUpdate();
+        const rest = customId.replace('rot_pg_', '');
+        const mode = rest.charAt(0);
+        let rotId = rest.slice(2), targetUid = null;
+        if (mode === 'x') {
+          const cut = rotId.lastIndexOf('_');
+          targetUid = rotId.slice(cut + 1);
+          rotId = rotId.slice(0, cut);
         }
-        return await interaction.editReply({
-          content: `👥 要幫 <@${targetUid}> 登記哪些時段？**可以一次勾多個**。\n*⏪ 開頭的是已經過去的時段，勾了就是補登。*`
-            + (dropped ? `\n*可選的時段太多，選單一次只放得下 ${pick.length} 個；剩下的 ${dropped} 個等這批登記完再按一次就會出現。*` : ''),
-          components: [new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder().setCustomId(`rot_proxyslot_${rotId}_${targetUid}`)
-              .setPlaceholder(`選時段，可多選（最多 ${pick.length} 段）`)
-              .setMinValues(1).setMaxValues(pick.length)
-              .addOptions(pick.map(p => new StringSelectMenuOptionBuilder()
-                .setLabel(`${p.idx < curIdx ? '⏪ ' : ''}${rotSlotLabel(rot, p.idx)}${p.n ? `　🤝 併團(${p.n}人)` : ''}`.slice(0, 100))
-                .setDescription(`${rotDayLabel(rotSlotMs(rot, p.idx))}${p.idx < curIdx ? '　（補登）' : ''}`.slice(0, 100))
-                .setValue(String(p.idx))))
-          )]
-        });
+        if (!['t', 'd', 's', 'x'].includes(mode)) {
+          return await interaction.editReply({ content: '❌ 這個選單已失效，請重新按一次。', components: [] });
+        }
+        const doc = await db.collection('map_rotations').doc(rotId).get().catch(() => null);
+        if (!doc?.exists) return await interaction.editReply({ content: '❌ 這張排班表已經不存在了。', components: [] });
+        const rot = doc.data();
+        if (mode === 'x' && !rotCanProxy(rot, interaction)) {
+          return await interaction.editReply({ content: '❌ 你沒有代登記的權限。', components: [] });
+        }
+        const canForce = rot.creatorId === interaction.user.id
+          || isSuperAdmin(interaction.user.id, interaction.memberPermissions);
+        const page = parseInt(interaction.values[0], 10);
+        return await interaction.editReply(
+          rotPickerPayload(rot, rotId, mode, interaction.user.id, targetUid, Number.isFinite(page) ? page : null, canForce)
+        );
+      }
+
+      // 分頁挑完時段：自己接（用自己的名冊角色，付費成員）
+      if (customId.startsWith('rot_ps_t_')) {
+        await interaction.deferUpdate();
+        const rotId = customId.replace('rot_ps_t_', '');
+        const ref = db.collection('map_rotations').doc(rotId);
+        const doc = await ref.get().catch(() => null);
+        if (!doc?.exists) return await interaction.editReply({ content: '❌ 這張排班表已經不存在了。', components: [] });
+        const rot = doc.data();
+        if (rot.isClosed) return await interaction.editReply({ content: '🚪 這張排班表已經結束了。', components: [] });
+
+        const idxs = rotParseIdxList(interaction.values, rot);
+        if (!idxs.length) return await interaction.editReply({ content: '❌ 沒有有效的時段。', components: [] });
+
+        const prof = (await fetchProfile(interaction.user.id)).data;
+        const ign = prof.mainIgn || interaction.member?.displayName || interaction.user.username;
+        const colors = rotAssignColor(rot, interaction.user.id);
+        const curIdx = rotCurrentIndex(rot);
+        const at = Date.now();
+
+        let res;
+        try {
+          res = await rotClaimSlots(ref, idxs, () => ({ userId: interaction.user.id, ign, at }),
+            { [`colors.${interaction.user.id}`]: colors[interaction.user.id] });
+        } catch (e) {
+          const msg = ROT_CLAIM_ERRORS[e.message];
+          if (!msg) console.error('認領時段交易失敗:', e.message);
+          return await interaction.editReply({ content: msg || '⏳ 這次沒寫進去（可能同時有人在搶），請再按一次。', components: [] });
+        }
+
+        const merged = { ...rot, slots: res.slots, colors };
+        cacheRot(rotId, merged);
+        await refreshRotationMessage(rotId, merged, interaction);
+
+        let note;
+        if (res.written.length) {
+          const ahead = res.written.filter(i => i >= curIdx).length;
+          const back = res.written.length - ahead;
+          note = `✅ 已登記 ${res.written.length} 段：${rotSlotRangeLabel(rot, res.written)}`
+            + (ahead ? `\n⏰ 其中 ${ahead} 段還沒到，到點機器人會 tag 你。` : '')
+            + (back ? `\n⏪ 其中 ${back} 段是補登已經打完的時間。` : '')
+            + '\n要反悔的話按面板上的「❌ 取消時段」。';
+        } else {
+          note = '😅 一段都沒寫進去。';
+        }
+        if (res.skipped.length) note += '\n' + rotSkipReport(rot, res.skipped);
+        return await interaction.editReply({ content: note.slice(0, 1900), components: [] });
+      }
+
+      // 分頁挑完時段：取消
+      if (customId.startsWith('rot_ps_d_')) {
+        await interaction.deferUpdate();
+        const rotId = customId.replace('rot_ps_d_', '');
+        const ref = db.collection('map_rotations').doc(rotId);
+        const doc = await ref.get().catch(() => null);
+        if (!doc?.exists) return await interaction.editReply({ content: '❌ 這張排班表已經不存在了。', components: [] });
+        const rot = doc.data();
+        const idxs = rotParseIdxList(interaction.values, rot);
+        if (!idxs.length) return await interaction.editReply({ content: '❌ 沒有有效的時段。', components: [] });
+        const canForce = rot.creatorId === interaction.user.id
+          || isSuperAdmin(interaction.user.id, interaction.memberPermissions);
+
+        let res;
+        try {
+          res = await rotDropSlots(ref, idxs, interaction.user.id, canForce);
+        } catch (e) {
+          if (e.message !== 'GONE') console.error('退班交易失敗:', e.message);
+          return await interaction.editReply({
+            content: e.message === 'GONE' ? '❌ 這張排班表已經不存在了。' : '⏳ 這次沒寫進去，請再試一次。',
+            components: []
+          });
+        }
+
+        const merged = { ...rot, slots: res.slots };
+        cacheRot(rotId, merged);
+        await refreshRotationMessage(rotId, merged, interaction);
+
+        let note;
+        if (res.written.length) {
+          const forced = res.detail.filter(d => !d.isOwner);
+          note = `🗑️ 已退掉 ${res.written.length} 段：${rotSlotRangeLabel(rot, res.written)}`;
+          const kept = res.detail.filter(d => d.remain.length);
+          if (kept.length) {
+            note += '\n🤝 這幾段還有別人在：' + kept
+              .map(d => `${rotSlotLabel(rot, d.idx)} → ${d.remain.map(u => `<@${u.userId}>`).join('、')}`)
+              .join('；');
+          }
+          if (forced.length) {
+            note += '\n👮 代為取消：' + forced
+              .map(d => `${rotSlotLabel(rot, d.idx)}（原本是 ${d.occupants.map(u => `<@${u.userId}>`).join('、')}）`)
+              .join('；');
+          }
+        } else {
+          note = '😅 一段都沒退掉。';
+        }
+        if (res.skipped.length) note += '\n' + rotSkipReport(rot, res.skipped);
+        return await interaction.editReply({ content: note.slice(0, 1900), components: [] });
       }
 
       // 熱門地圖排隊：取消自己的時段
@@ -3989,6 +4150,57 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ----------------------------------------
     if (interaction.isModalSubmit()) {
       const customId = interaction.customId;
+
+      // 📢 自動廣播：新增、改排程、改內容。三張表單共用同一套驗證，任何一項看不懂就整張退回、什麼都不寫。
+      if (customId === 'modal_bc_add' || customId.startsWith('modal_bc_sched_') || customId.startsWith('modal_bc_text_')) {
+        if (!isSuperAdmin(interaction.user.id, interaction.memberPermissions)) {
+          return interaction.reply({ content: '❌ 僅超級管理員可使用！', flags: MessageFlags.Ephemeral });
+        }
+        await bcAck(interaction);
+        const field = (id) => { try { return interaction.fields.getTextInputValue(id); } catch { return ''; } };
+        const fail = (msg) => interaction.editReply(bcPanelPayload(`❌ ${msg}\n（這次的內容沒有存，請重新操作。）`));
+
+        // 先把要寫的欄位驗證完，全部 OK 才寫
+        const patch = {};
+        let key = null;
+        const isAdd = customId === 'modal_bc_add';
+        if (!isAdd) key = customId.replace(customId.startsWith('modal_bc_sched_') ? 'modal_bc_sched_' : 'modal_bc_text_', '');
+        const existing = key ? BC_LIST.find(x => x.key === key) : null;
+        if (!isAdd && !existing) return await fail('找不到這個廣播，可能剛被刪掉了。');
+        if (isAdd && BC_LIST.filter(x => x.custom).length >= BC_MAX_CUSTOM) return await fail(`自訂廣播最多 ${BC_MAX_CUSTOM} 個。`);
+
+        if (isAdd || customId.startsWith('modal_bc_text_')) {
+          const name = field('bc_name').trim();
+          const text = field('bc_text').trim();
+          if (!name) return await fail('名稱不能是空的。');
+          if (!text) return await fail('廣播內容不能是空的。');
+          patch.name = name.slice(0, 40);
+          patch.text = text.slice(0, 1800);
+        }
+        if (isAdd || customId.startsWith('modal_bc_sched_')) {
+          const days = bcParseDays(field('bc_days'));
+          if (days === null) return await fail('星期看不懂。可以寫「每天」「一三五」「週二」「平日」「假日」。');
+          const times = bcParseTimes(field('bc_times'));
+          if (times === null) return await fail('時間看不懂。格式是 `20:00`，多個用逗號隔開，例如 `09:00,19:00`（最多 6 個）。');
+          const chan = await bcResolveChannel(field('bc_chan'));
+          if (!chan.ok) return await fail(chan.reason);
+          patch.days = days; patch.times = times; patch.channelId = chan.id;
+        }
+
+        if (isAdd) {
+          const ref = db.collection(BC_COLLECTION).doc();
+          await ref.set({
+            ...patch, custom: true, enabled: true,
+            createdBy: interaction.user.id,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          await initBroadcasts();
+          return await interaction.editReply(bcDetailPayload(ref.id, '✅ 已新增並開始排程。'));
+        }
+        await db.collection(BC_COLLECTION).doc(key).set(patch, { merge: true });
+        await initBroadcasts();
+        return await interaction.editReply(bcDetailPayload(key, '✅ 已更新，新的排程立刻生效。'));
+      }
 
       // 🏷️ 補填暱稱提交：只動綽號這一個欄位（merge），再套用 綽號[等級_職業]
       if (customId === 'modal_nick_fix') {
@@ -5437,7 +5649,6 @@ const ROT_SLOT_MIN = 30;            // 一格固定 30 分鐘（不開放自訂�
 const ROT_DESC_BUDGET = 3200;       // 留給表格的字數，其餘讓給標題、狀態列與圖例
 const ROT_COL_HOURS = 12;           // 行事曆一欄涵蓋幾小時
 const ROT_MAX_COLS = 4;             // 最多幾欄（12 小時 × 4 = 48 小時）
-const ROT_PICK_LIMIT = 25;          // Discord 下拉選單硬上限
 const ROT_PRE_NOTIFY_MS = 30 * 60000;   // 輪到自己前 30 分鐘提醒一次
 const ROT_COLORS = [31, 32, 33, 34, 35, 36];   // ANSI 前景色：紅 綠 黃 藍 洋紅 青
 const ROT_WEEKDAY = ['日', '一', '二', '三', '四', '五', '六'];
@@ -5688,8 +5899,8 @@ function rotRenderGrid(rot, nowMs = Date.now()) {
       t += renderRow(rows[i]); i++; lines++;
     }
     t += '```';
-    if (skipped) t += `\n*…還有 ${skipped} 列放不下，用下拉選單一樣排得到*`;
-    if (hiddenSlots) t += `\n*…後面還有 ${hiddenSlots} 格沒畫出來，用下拉選單一樣排得到*`;
+    if (skipped) t += `\n*…還有 ${skipped} 列放不下，按「✋ 我要接這段」切換時間範圍一樣排得到*`;
+    if (hiddenSlots) t += `\n*…後面還有 ${hiddenSlots} 格沒畫出來，按「✋ 我要接這段」切換時間範圍一樣排得到*`;
     return t;
   };
 
@@ -5922,20 +6133,116 @@ function rotSkipReport(rot, skipped) {
     .join('\n');
 }
 
-const ROT_PAST_QUOTA = 12;          // 選單裡最多留幾個可補登的過去時段（12 格 = 6 小時）
+// ── 分頁挑時段 ──
+// Discord 下拉選單最多 25 個選項，但一張表最長 48 小時 = 96 格。
+// 以前是「過去的留 12 個、剩下的給未來」硬塞進 25 格，結果前面沒人選的時候，
+// 後面的時間整段被擠掉，根本挑不到。現在改成分頁：一頁 = 行事曆的一欄（12 小時 = 24 格），
+// 先選要看哪一頁，再勾那一頁裡的時段。
+function rotPageSize(rot) {
+  return Math.max(1, Math.min(25, Math.round(ROT_COL_HOURS * 60 / rotSlotLen(rot))));
+}
+function rotPageLabel(rot, page) {
+  const size = rotPageSize(rot);
+  const a = page * size;
+  const b = Math.min(rot.slotCount, a + size);
+  const startMs = rotSlotMs(rot, a), endMs = rotSlotMs(rot, b);
+  const d1 = rotDayLabel(startMs), d2 = rotDayLabel(endMs - 1);
+  return `${d1} ${rotTimeLabel(startMs)} ~ ${d1 === d2 ? '' : d2 + ' '}${rotTimeLabel(endMs)}`;
+}
 
-// 選單只有 25 個名額。過去的格子不能把未來的擠掉，所以先讓未來的占位子，
-// 剩下的名額（最多 ROT_PAST_QUOTA 個）給最接近現在的過去時段；
-// 沒有未來時段時（表快跑完了），整個額度都讓給補登。
-function rotWindow(all, curIdx, getIdx = (x) => x, limit = ROT_PICK_LIMIT, pastQuota = ROT_PAST_QUOTA) {
-  const past = all.filter(x => getIdx(x) < curIdx);
-  const future = all.filter(x => getIdx(x) >= curIdx);
-  const futureKeep = future.slice(0, Math.max(0, limit - Math.min(pastQuota, past.length)));
-  const pastKeep = past.slice(-Math.max(0, limit - futureKeep.length));
-  return {
-    picked: [...pastKeep, ...futureKeep],
-    dropped: (past.length - pastKeep.length) + (future.length - futureKeep.length)
+// mode：t＝自己接、d＝取消、s＝外援、x＝幫別人代登記
+function rotPickerItems(rot, mode, userId, targetUid, canForce, nowMs) {
+  if (mode === 'd') {
+    const out = [];
+    for (let i = 0; i < rot.slotCount; i++) {
+      if (!rotSlotUsers(rot, i).length) continue;
+      // 一般人只列自己在的格子（含別人代登記給他的）；開表者與管理員可以退任何人的
+      if (canForce || rotHasUser(rot, i, userId)) out.push({ idx: i, n: 0 });
+    }
+    return out;
+  }
+  return rotPickableIndexes(rot, mode === 'x' ? targetUid : userId, nowMs, true);
+}
+
+function rotPickerPayload(rot, rotId, mode, userId, targetUid, page, canForce = false) {
+  const nowMs = Date.now();
+  const curIdx = rotCurrentIndex(rot, nowMs);
+  const size = rotPageSize(rot);
+  const items = rotPickerItems(rot, mode, userId, targetUid, canForce, nowMs);
+
+  const emptyMsg = {
+    t: '💡 目前沒有可以接的時段（都滿了或你都排過了）。',
+    d: '💡 你目前沒有排到可以取消的時段。',
+    s: '💡 目前沒有可以登記的時段（都滿了或你都排過了）。',
+    x: `💡 <@${targetUid}> 沒有可以登記的時段（都滿了或都排過了）。`
   };
+  if (!items.length) return { content: emptyMsg[mode], components: [] };
+
+  const byPage = new Map();
+  items.forEach(it => {
+    const p = Math.floor(it.idx / size);
+    if (!byPage.has(p)) byPage.set(p, []);
+    byPage.get(p).push(it);
+  });
+  const pages = [...byPage.keys()].sort((a, b) => a - b);
+
+  // 沒指定頁就挑「現在這一頁」；現在這頁沒有東西就往後找最近的，再不行就最後一頁
+  let cur = page;
+  if (cur === null || cur === undefined || !byPage.has(cur)) {
+    const nowPage = Math.floor(Math.max(0, curIdx) / size);
+    cur = pages.find(p => p >= nowPage);
+    if (cur === undefined) cur = pages[pages.length - 1];
+  }
+
+  const rows = [];
+  if (pages.length > 1) {
+    const pgId = `rot_pg_${mode}_${rotId}` + (mode === 'x' ? `_${targetUid}` : '');
+    rows.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId(pgId)
+        .setPlaceholder('📅 切換時間範圍')
+        .addOptions(pages.slice(0, 25).map(p => new StringSelectMenuOptionBuilder()
+          .setLabel(rotPageLabel(rot, p).slice(0, 100))
+          .setDescription(`${byPage.get(p).length} 格可選`)
+          .setValue(String(p))
+          .setDefault(p === cur)))
+    ));
+  }
+
+  const list = byPage.get(cur);
+  const slotId = mode === 't' ? `rot_ps_t_${rotId}`
+    : mode === 'd' ? `rot_ps_d_${rotId}`
+    : mode === 's' ? `rot_sosslot_${rotId}`
+    : `rot_proxyslot_${rotId}_${targetUid}`;
+  rows.push(new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder().setCustomId(slotId)
+      .setPlaceholder(`選時段，可多選（這一頁 ${list.length} 格可選）`)
+      .setMinValues(1).setMaxValues(list.length)
+      .addOptions(list.map(it => {
+        const past = it.idx < curIdx;
+        const names = rotSlotUsers(rot, it.idx).map(u => u.ign).join('、');
+        const desc = rotDayLabel(rotSlotMs(rot, it.idx))
+          + (past ? '　（補登）' : '')
+          + (mode === 'd' ? `　${names}` : (it.n ? `　已有：${names}` : ''));
+        const opt = new StringSelectMenuOptionBuilder()
+          .setLabel(`${past ? '⏪ ' : ''}${rotSlotLabel(rot, it.idx)}${it.n ? `　🤝 併團(${it.n}人)` : ''}`.slice(0, 100))
+          .setDescription(desc.slice(0, 100))
+          .setValue(String(it.idx));
+        if (mode === 's' && it.idx === curIdx) opt.setDefault(true);   // 外援預設先勾「現在這一格」
+        return opt;
+      }))
+  ));
+
+  const head = {
+    t: '✋ **選你要接的時段**，可以一次勾多個。\n*⏪ 開頭的是已經過去的時段，勾了就是補登。*',
+    d: '❌ **選要取消的時段**，可以一次勾多個。\n*只列你自己在的格子（含別人代你登記的）。*',
+    s: '🆘 **外援顧圖**：勾選你顧的時段，**可以一次勾多段**，下一步再填角色名。\n'
+      + '*這些時段**不會跟你收錢**。⏪ 開頭的是已經過去的時段（補登）。*',
+    x: `👥 要幫 <@${targetUid}> 登記哪些時段？**可以一次勾多個**。\n*⏪ 開頭的是已經過去的時段，勾了就是補登。*`
+  }[mode];
+  const note = pages.length > 1
+    ? `\n📅 這張表分成 **${pages.length}** 個時間範圍（每頁 ${size} 格），用上面的選單切換。現在顯示：**${rotPageLabel(rot, cur)}**`
+    : '';
+  return { content: (head + note).slice(0, 1900), components: rows };
 }
 
 // 代登記選到一半的時段。按鈕和表單的 customId 只有 100 字，塞不下一串格號，
@@ -6306,10 +6613,14 @@ function buildRotationComponents(rotId, rot, nowMs = Date.now()) {
 
   // 兩排按鈕：上排是大家常用的，下排是管理動作。
   // 外援改成一鍵按鈕（會跳表單問遊戲 ID），所以選單少一排，剛好容得下。
+  // 「接時段」「取消時段」都是按鈕，按下去才用分頁選單挑（見 rotPickerPayload），
+  // 面板上就不用再放下拉選單，也就沒有 25 個選項的上限問題。
   const rows = [
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`rot_refresh_${rotId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`rot_pb_${rotId}`).setLabel('✋ 我要接這段／補登').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`rot_db_${rotId}`).setLabel('❌ 取消時段').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`rot_sos_${rotId}`).setLabel('🆘 我來顧圖（外援）').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`rot_refresh_${rotId}`).setLabel('🔄 即時更新').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`share_rot_${rotId}`).setLabel('📤 分享面板').setStyle(ButtonStyle.Secondary)
     ),
     new ActionRowBuilder().addComponents(
@@ -6327,46 +6638,7 @@ function buildRotationComponents(rotId, rot, nowMs = Date.now()) {
     )
   ];
 
-  // 這個面板是公開的、所有人共用一份，所以選單不能只列某個人的時段；
-  // 按下去之後才會按操作者的身分驗證一次。過去的時段也列出來讓人補登。
-  const curIdx = rotCurrentIndex(rot, nowMs);
-  const { picked: pickable } = rotWindow(rotPickableIndexes(rot, null, nowMs, true), curIdx, p => p.idx);
-  if (pickable.length) {
-    rows.push(new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder().setCustomId(`rot_take_${rotId}`)
-        .setPlaceholder(`✋ 我要接這段／補登 — 可一次勾多段（最多 ${pickable.length}）`)
-        .setMinValues(1).setMaxValues(pickable.length)
-        .addOptions(pickable.map(p => new StringSelectMenuOptionBuilder()
-          .setLabel(`${p.idx < curIdx ? '⏪ ' : ''}${rotSlotLabel(rot, p.idx)}${p.n ? `　🤝 併團(${p.n}人)` : ''}`.slice(0, 100))
-          .setDescription(`${rotDayLabel(rotSlotMs(rot, p.idx))}${p.idx < curIdx ? '　（補登已打完的）' : ''}${p.n ? `　已有：${rotSlotUsers(rot, p.idx).map(u => u.ign).join('、')}` : ''}`.slice(0, 100))
-          .setValue(String(p.idx))))
-    ));
-  }
-
-  // 退班的唯一出口。只列未來的話，補登錯的過去時段就沒地方取消了。
-  // 判定看的是「你在不在那一格」，所以別人代登記給你的班你也退得掉。
-  const { picked: mine } = rotWindow(rotAllTakenIndexes(rot, nowMs, true), curIdx, i => i);
-  if (mine.length) {
-    rows.push(new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder().setCustomId(`rot_drop_${rotId}`)
-        .setPlaceholder(`❌ 取消時段 — 有自己的都能退（含別人代排的），可多選`)
-        .setMinValues(1).setMaxValues(mine.length)
-        .addOptions(mine.map(i => new StringSelectMenuOptionBuilder()
-          .setLabel(`${i < curIdx ? '⏪ ' : ''}${rotSlotLabel(rot, i)}`.slice(0, 100))
-          .setDescription(`${rotDayLabel(rotSlotMs(rot, i))}　${rotSlotUsers(rot, i).map(u => u.ign).join('、')}`.slice(0, 100))
-          .setValue(String(i))))
-    ));
-  }
   return rows;
-}
-
-// 面板是公開的、所有人共用一份，所以選單不能只列某個人的時段。
-// 這裡列出所有「已被認領且還沒過去」的時段，按下去時才驗證是不是本人。
-function rotAllTakenIndexes(rot, nowMs = Date.now(), includePast = false) {
-  const from = includePast ? 0 : Math.max(0, rotCurrentIndex(rot, nowMs));
-  const out = [];
-  for (let i = from; i < rot.slotCount; i++) if (rotSlotUsers(rot, i).length) out.push(i);
-  return out;
 }
 
 // 公開貼出結算報告，並把排班面板一起更新成已結束
@@ -6528,6 +6800,321 @@ async function buildCharSelectRowForUser(targetUid, operatorId) {
       .setPlaceholder('⚠️ 請選擇欲刪除的分身角色')
       .addOptions(options)
   );
+}
+
+// ===================== 自動廣播管理 =====================
+// 公開廣播（199 倒數、週一突襲、週二名冊、每晚突襲提醒）以前是寫死在程式裡的 cron，
+// 現在改成「內建清單 + Firestore 設定」：
+//  ‧ 內建廣播：預設時間寫在 BC_BUILTIN，管理員可以開／關、改星期與時間、改發送頻道
+//  ‧ 自訂廣播：管理員自己新增（標題文字、星期、時間、頻道），可以改、可以刪
+// 設定存在 broadcast_settings 集合；沒有設定文件的內建廣播一律照預設跑，所以資料庫是空的也不會停播。
+// 營運用的提醒（揪團 30 分鐘、賭局催促、地圖排隊換班）不在這裡，那些不能關。
+const BC_TZ = 'Asia/Taipei';
+const BC_COLLECTION = 'broadcast_settings';
+const BC_MAX_CUSTOM = 15;
+const BC_DAY_NAMES = ['日', '一', '二', '三', '四', '五', '六'];
+
+async function bcSend(channelId, payload) {
+  const ch = await client.channels.fetch(channelId || REPORT_CHANNEL_ID).catch(() => null);
+  if (!ch?.isTextBased()) return { ok: false, reason: '找不到這個頻道，或機器人看不到它' };
+  try {
+    await ch.send(payload);
+    return { ok: true };
+  } catch (e) {
+    console.error('廣播發送失敗:', e.message);
+    return { ok: false, reason: e.message };
+  }
+}
+
+async function bcRun199(channelId) {
+  if (!db) return { ok: false, reason: '資料庫未連線' };
+  // 只用 mainLevel 篩選。原本多帶 where('isRetired','==',false)，但 Firestore 的
+  // == false 要求欄位存在，沒寫過這欄位的人會被整個漏掉，等於收不到倒數推播。
+  const snap = await db.collection('member_profiles').where('mainLevel', '==', '199').get();
+  if (snap.empty) return { ok: true, note: '目前沒有 199 等的人，所以沒有發任何訊息' };
+  const now = Date.now();
+  const lines = [];
+  snap.forEach(doc => {
+    const data = doc.data();
+    const start = data.reach199At ? data.reach199At.toMillis() : now;
+    const days = Math.floor((now - start) / (1000 * 60 * 60 * 24)) + 1;
+    lines.push(`🔥 <@${data.userId}>（\`${codeSafe(data.nickname || '')}[${data.mainLevel}_${data.mainJob}]\`）邁向 200 等修煉：**第 ${days} 天**！`);
+  });
+  const embed = new EmbedBuilder().setColor(0xE74C3C).setTitle('⏳【即將登頂 200 等】巔峰修煉倒數').setDescription(lines.join('\n').slice(0, 4000));
+  return await bcSend(channelId, { embeds: [embed] });
+}
+
+async function bcRunRaidMon(channelId) {
+  const embed = new EmbedBuilder()
+    .setColor(0xE74C3C)
+    .setTitle('🔔【每週例行提醒】突襲遠征結算倒數')
+    .setDescription(
+      '週二 08:00 維護後次數就歸零了，請把握時間打完突襲王！\n' +
+      '點下面的按鈕可以看**自己每一隻角色**還差幾次（只有你看得到）。'
+    );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('btn_raid_self').setLabel('⚔️ 看我的突襲進度').setStyle(ButtonStyle.Primary)
+  );
+  return await bcSend(channelId, { embeds: [embed], components: [row] });
+}
+
+async function bcRunRoster(channelId) {
+  const embed = new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle('🔔【每週名冊維護】請大家更新角色資訊唷！')
+    .setDescription('點擊下方按鈕將**自動帶入您所有角色的目前等級**，只要改數字就完成更新！\n新增／刪除角色請用 `/名冊`。');
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('btn_batch_level_self').setLabel('🆙 一次更新所有角色等級').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('btn_trigger_wizard_main').setLabel('📝 重新報到 / 加分身').setStyle(ButtonStyle.Secondary)
+  );
+  return await bcSend(channelId, { embeds: [embed], components: [row] });
+}
+
+async function bcRunRaidNight(channelId) {
+  const embed = new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle('🌙【睡前確認】今天的突襲王打完了嗎？')
+    .setDescription('點下面的按鈕看自己每一隻角色還差幾次，順手把今天打的記上去。\n只有你看得到，不會洗頻。');
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('btn_raid_self').setLabel('⚔️ 看我的突襲進度').setStyle(ButtonStyle.Primary)
+  );
+  return await bcSend(channelId, { embeds: [embed], components: [row] });
+}
+
+// days：[] 代表每天；否則是 0(日)~6(六)。times：['HH:mm', ...]，一律台北時間。
+const BC_BUILTIN = [
+  { key: 'bc_199', name: '199 等倒數廣播', desc: '列出所有 199 等的人「邁向 200 等修煉第幾天」。沒有人 199 等就不發。', days: [], times: ['08:00'], run: bcRun199 },
+  { key: 'bc_raid_mon', name: '週一突襲結算倒數', desc: '提醒週二 08:00 突襲次數歸零，附「看我的突襲進度」按鈕。', days: [1], times: ['09:00'], run: bcRunRaidMon },
+  { key: 'bc_roster_tue', name: '週二名冊更新提醒', desc: '提醒大家更新角色等級，附「一次更新所有角色等級」與「重新報到」按鈕。', days: [2], times: ['09:00', '19:00'], run: bcRunRoster },
+  { key: 'bc_raid_night', name: '每晚突襲睡前提醒', desc: '提醒大家把今天打的突襲記上去，附「看我的突襲進度」按鈕。', days: [], times: ['23:00'], run: bcRunRaidNight }
+];
+
+let BC_LIST = [];                 // 最近一次載入並排程的完整清單
+let BC_STATE = { ok: true, reason: '' };
+const BC_TASKS = new Map();       // key -> [cron task]
+let BC_CHAIN = Promise.resolve(); // 排程重建一次只跑一個，避免兩個人同時按造成重複排程
+let BC_RETRY = null;
+
+async function bcLoadAll() {
+  const byKey = new Map();
+  let ok = true, reason = '';
+  if (!db) {
+    ok = false; reason = '資料庫未連線';
+  } else {
+    try {
+      const snap = await withTimeout(db.collection(BC_COLLECTION).get(), 8000, '讀取逾時');
+      snap.forEach(d => byKey.set(d.id, d.data()));
+    } catch (e) {
+      ok = false; reason = e.message;
+      console.error('讀取廣播設定失敗:', e.message);
+    }
+  }
+  // 沒有設定文件、缺欄位，一律照預設（enabled 缺了就當開著，跟舊行為一致）
+  const list = BC_BUILTIN.map(def => {
+    const o = byKey.get(def.key) || {};
+    return {
+      key: def.key, name: def.name, desc: def.desc, custom: false, run: def.run,
+      enabled: o.enabled !== false,
+      days: Array.isArray(o.days) ? o.days : def.days,
+      times: Array.isArray(o.times) && o.times.length ? o.times : def.times,
+      channelId: o.channelId || null
+    };
+  });
+  byKey.forEach((o, key) => {
+    if (!o?.custom) return;
+    list.push({
+      key, name: o.name || '（未命名）', text: o.text || '', custom: true,
+      enabled: o.enabled !== false,
+      days: Array.isArray(o.days) ? o.days : [],
+      times: Array.isArray(o.times) ? o.times : [],
+      channelId: o.channelId || null
+    });
+  });
+  return { ok, reason, list };
+}
+
+async function bcRunEntry(e) {
+  try {
+    const channelId = e.channelId || REPORT_CHANNEL_ID;
+    if (e.custom) {
+      return await bcSend(channelId, {
+        content: String(e.text || '').slice(0, 2000),
+        allowedMentions: { parse: ['users', 'roles'] }      // 不允許 @everyone／@here，避免手滑全員通知
+      });
+    }
+    return await e.run(channelId);
+  } catch (err) {
+    console.error(`廣播「${e.name}」執行異常:`, err.message);
+    return { ok: false, reason: err.message };
+  }
+}
+
+async function bcFire(key) {
+  const e = BC_LIST.find(x => x.key === key);
+  if (!e || !e.enabled) return;
+  const r = await bcRunEntry(e);
+  if (!r.ok) console.error(`廣播「${e.name}」發送失敗：${r.reason}`);
+}
+
+async function bcApply() {
+  const { ok, reason, list } = await bcLoadAll();
+  BC_LIST = list;
+  BC_STATE = { ok, reason };
+
+  for (const tasks of BC_TASKS.values()) {
+    tasks.forEach(t => {
+      try { t.stop(); } catch (e) { console.error('停止舊排程失敗:', e.message); }
+    });
+  }
+  BC_TASKS.clear();
+
+  let points = 0;
+  for (const e of list) {
+    if (!e.enabled) continue;
+    const tasks = [];
+    for (const t of e.times) {
+      const m = String(t).match(/^(\d{2}):(\d{2})$/);
+      if (!m) continue;
+      const expr = `${Number(m[2])} ${Number(m[1])} * * ${e.days.length ? e.days.join(',') : '*'}`;
+      if (!cron.validate(expr)) { console.error('廣播排程格式無效:', e.key, expr); continue; }
+      tasks.push(cron.schedule(expr, () => { bcFire(e.key); }, { timezone: BC_TZ }));
+      points++;
+    }
+    BC_TASKS.set(e.key, tasks);
+  }
+  console.log(`📢 廣播排程完成：${list.filter(x => x.enabled).length}/${list.length} 個啟用，共 ${points} 個發送時間點`);
+
+  // 讀設定失敗時先照預設跑，一分鐘後再試一次，不要讓被關掉的廣播永遠復活
+  if (!ok && !BC_RETRY) {
+    BC_RETRY = setTimeout(() => { BC_RETRY = null; initBroadcasts(); }, 60000);
+  }
+}
+
+function initBroadcasts() {
+  BC_CHAIN = BC_CHAIN.then(bcApply).catch(e => console.error('廣播排程失敗:', e.message));
+  return BC_CHAIN;
+}
+
+// ── 輸入解析 ──
+// 星期：每天／一三五／週二、週四／平日／假日／1,3,5。回傳 [] ＝每天，null ＝看不懂
+function bcParseDays(raw) {
+  const s = String(raw || '').trim();
+  if (!s || /^(每天|每日|天天|daily|all|\*)$/i.test(s)) return [];
+  if (/平日|工作日/.test(s)) return [1, 2, 3, 4, 5];
+  if (/假日|週末|周末/.test(s)) return [0, 6];
+  const set = new Set();
+  for (const ch of s.replace(/星期|禮拜|週|周|每/g, '')) {
+    if (/[\s,，、/]/.test(ch)) continue;
+    const i = '日天一二三四五六'.indexOf(ch);
+    if (i >= 0) { set.add(i <= 1 ? 0 : i - 1); continue; }
+    if (/[0-7]/.test(ch)) { set.add(ch === '7' ? 0 : Number(ch)); continue; }
+    return null;
+  }
+  if (!set.size) return null;
+  return set.size === 7 ? [] : [...set].sort((a, b) => a - b);
+}
+
+// 時間：09:00 或 09:00,19:00（最多 6 個）。回傳 null ＝看不懂
+function bcParseTimes(raw) {
+  const parts = String(raw || '').split(/[,，、\s]+/).filter(Boolean);
+  if (!parts.length || parts.length > 6) return null;
+  const out = new Set();
+  for (const p of parts) {
+    const m = p.match(/^(\d{1,2})[:：](\d{2})$/);
+    if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return null;
+    out.add(`${String(Number(m[1])).padStart(2, '0')}:${m[2]}`);
+  }
+  return [...out].sort();
+}
+
+async function bcResolveChannel(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return { ok: true, id: null };
+  const id = (s.match(/\d{15,25}/) || [])[0];
+  if (!id) return { ok: false, reason: '頻道請填頻道 ID（在頻道上按右鍵 → 複製頻道 ID），或留空用公告頻道。' };
+  const ch = await client.channels.fetch(id).catch(() => null);
+  if (!ch?.isTextBased()) return { ok: false, reason: '找不到這個頻道，或機器人看不到它／它不是文字頻道。' };
+  return { ok: true, id };
+}
+
+const bcDaysLabel = (days) => (!days.length ? '每天' : '每週' + days.map(d => BC_DAY_NAMES[d]).join('、'));
+const bcSchedLabel = (e) => `${bcDaysLabel(e.days)} ${e.times.length ? e.times.join('、') : '（沒有時間）'}`;
+
+async function bcAck(interaction) {
+  if (typeof interaction.isFromMessage === 'function' && interaction.isFromMessage()) return interaction.deferUpdate();
+  return interaction.deferReply({ flags: MessageFlags.Ephemeral });
+}
+
+// ── 面板 ──
+function bcPanelPayload(notice) {
+  const lines = BC_LIST.map(e =>
+    `${e.enabled ? '🟢' : '⚫'} **${mdSafe(e.name)}**${e.custom ? ' ✍️' : ''}\n`
+    + `　🕒 ${bcSchedLabel(e)}　‧　📺 <#${e.channelId || REPORT_CHANNEL_ID}>`
+  );
+  const customCount = BC_LIST.filter(e => e.custom).length;
+  let desc = (notice ? `${notice}\n${PANEL_DIV}\n` : '') + lines.join('\n');
+  if (!BC_STATE.ok) {
+    desc = `⚠️ **讀取廣播設定失敗（${BC_STATE.reason}）**，目前顯示並執行的是預設值，一分鐘後會自動重試。\n${PANEL_DIV}\n` + desc;
+  }
+  desc = desc.slice(0, 3900);
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle('📢【自動廣播管理】')
+    .setDescription(desc)
+    .setFooter({ text: `🟢 開啟　⚫ 關閉　✍️ 自訂　‧　時間都是台北時間　‧　自訂 ${customCount}/${BC_MAX_CUSTOM}` });
+
+  const options = BC_LIST.slice(0, 25).map(e => new StringSelectMenuOptionBuilder()
+    .setLabel(`${e.enabled ? '🟢' : '⚫'} ${e.name}`.slice(0, 100))
+    .setDescription(bcSchedLabel(e).slice(0, 100))
+    .setValue(e.key));
+  return {
+    content: '',
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder().setCustomId('bc_pick').setPlaceholder('選一個廣播來管理（開關、改時間、測試）').addOptions(options)
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('bc_add').setLabel('➕ 新增自訂廣播').setStyle(ButtonStyle.Success).setDisabled(customCount >= BC_MAX_CUSTOM),
+        new ButtonBuilder().setCustomId('bc_refresh').setLabel('🔄 重新整理').setStyle(ButtonStyle.Secondary)
+      )
+    ]
+  };
+}
+
+function bcDetailPayload(key, notice) {
+  const e = BC_LIST.find(x => x.key === key);
+  if (!e) return bcPanelPayload('❌ 找不到這個廣播，可能剛被刪掉了。');
+  const embed = new EmbedBuilder()
+    .setColor(e.enabled ? 0x57F287 : 0x95A5A6)
+    .setTitle(`📢 ${e.name}${e.custom ? '（自訂）' : '（內建）'}`)
+    .setDescription((notice ? `${notice}\n${PANEL_DIV}\n` : '') + (e.custom ? '' : e.desc))
+    .addFields(
+      { name: '狀態', value: e.enabled ? '🟢 開啟中' : '⚫ 已關閉（不會發送）', inline: true },
+      { name: '排程', value: bcSchedLabel(e), inline: true },
+      { name: '發送頻道', value: `<#${e.channelId || REPORT_CHANNEL_ID}>${e.channelId ? '' : '（公告頻道）'}`, inline: true }
+    );
+  if (e.custom) embed.addFields({ name: '內容', value: (e.text || '（空白）').slice(0, 1000) });
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`bc_toggle_${key}`).setLabel(e.enabled ? '⏸️ 關閉' : '▶️ 開啟').setStyle(e.enabled ? ButtonStyle.Secondary : ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`bc_sched_${key}`).setLabel('🕒 改時間／頻道').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`bc_test_${key}`).setLabel('🧪 現在發一次').setStyle(ButtonStyle.Secondary)
+  );
+  if (e.custom) {
+    row.addComponents(
+      new ButtonBuilder().setCustomId(`bc_text_${key}`).setLabel('✏️ 改內容').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`bc_del_${key}`).setLabel('🗑️ 刪除').setStyle(ButtonStyle.Danger)
+    );
+  }
+  return {
+    content: '',
+    embeds: [embed],
+    components: [row, new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('bc_back').setLabel('⬅️ 返回清單').setStyle(ButtonStyle.Secondary)
+    )]
+  };
 }
 
 // ==========================================

@@ -6852,11 +6852,8 @@ async function bcRun199(channelId) {
 async function bcRunRaidMon(channelId) {
   const embed = new EmbedBuilder()
     .setColor(0xE74C3C)
-    .setTitle('🔔【每週例行提醒】突襲遠征結算倒數')
-    .setDescription(
-      '週二 08:00 維護後次數就歸零了，請把握時間打完突襲王！\n' +
-      '點下面的按鈕可以看**自己每一隻角色**還差幾次（只有你看得到）。'
-    );
+    .setTitle('🔔 突襲倒數：明天 08:00 歸零')
+    .setDescription('明天早上 8 點維護後次數歸零！查看每隻角色還差幾次（ 只有你看得到🤫 ）');
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('btn_raid_self').setLabel('⚔️ 看我的突襲進度').setStyle(ButtonStyle.Primary)
   );
@@ -6878,8 +6875,8 @@ async function bcRunRoster(channelId) {
 async function bcRunRaidNight(channelId) {
   const embed = new EmbedBuilder()
     .setColor(0x5865F2)
-    .setTitle('🌙【睡前確認】今天的突襲王打完了嗎？')
-    .setDescription('點下面的按鈕看自己每一隻角色還差幾次，順手把今天打的記上去。\n只有你看得到，不會洗頻。');
+    .setTitle('🌙 記錄今天的突襲')
+    .setDescription('按下面的按鈕看每隻角色還差幾次，我可以幫你記住，只有你看得到 🤫');
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('btn_raid_self').setLabel('⚔️ 看我的突襲進度').setStyle(ButtonStyle.Primary)
   );

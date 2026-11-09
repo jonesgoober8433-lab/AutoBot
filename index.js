@@ -5968,8 +5968,13 @@ function rotRenderGrid(rot, nowMs = Date.now()) {
   return { table, legend: sharedNote + supNote + legend + proxyNote };
 }
 
-// 把一筆金額依「均攤」或「按時間攤」分給參與者，並處理整數進位的零頭。
-// 零頭全丟給最後一個人，這樣每個人的數字相加一定等於總額，對帳不會差一塊錢。
+// 把一筆金額依「均攤」或「按時間攤」分給參與者。
+// 以前是每人無條件捨去，再把除不盡的零頭全部加在名單最後一位身上 ——
+// 1,000 ÷ 6 人 → 前 5 人 166、最後一位 170，看起來像在針對最後一個人。
+// 現在每個人都用同一套規則取整，大家的數字一致（按時間攤時，時段一樣的人也一樣）：
+//  ‧ 要付錢（淨成本）：每人進位到整數，多收的零頭歸墊付人
+//  ‧ 轉手賺錢要分紅：每人捨去到整數，剩下的零頭留在墊付人
+// 浮點誤差用 1e-6 擋住，避免剛好整除的金額被誤進位 1。
 function rotSplitAmount(total, rows, mode) {
   const n = rows.length;
   if (!n) return [];
@@ -5977,13 +5982,11 @@ function rotSplitAmount(total, rows, mode) {
   const sign = total < 0 ? -1 : 1;
   const abs = Math.abs(total);
 
-  const out = rows.map(r => {
+  return rows.map(r => {
     const raw = mode === ROT_SPLIT_TIME ? abs * (r.slots / totalSlots) : abs / n;
-    return { ...r, amount: Math.floor(raw) };
+    const whole = sign < 0 ? Math.floor(raw + 1e-6) : Math.ceil(raw - 1e-6);
+    return { ...r, amount: whole * sign };
   });
-  const used = out.reduce((a, r) => a + r.amount, 0);
-  out[out.length - 1].amount += (abs - used);        // 零頭
-  return out.map(r => ({ ...r, amount: r.amount * sign }));
 }
 
 // 誰算「有打的人」：只算已經開始的時段。提前收工時，還沒輪到的人不用付錢。
@@ -6475,16 +6478,18 @@ function buildRotationSettlement(rot, nowMs = Date.now(), shareProfit = true) {
     return `‧ ${r.ign}：${mine} ＝ **${formatMeso(Math.abs(r.amount))}**${sharedTag}`;
   });
 
+  const sharesTotal = rowsWithAmt.reduce((a, r) => a + Math.abs(r.amount), 0);
   if (!noSplit) {
-    const exact = rowsWithAmt.reduce((a, r) => a + Math.abs(r.amount), 0);
-    if (exact !== abs) detail.push(`‧ 進位零頭 ${Math.abs(abs - exact)} 已併入最後一位`);
+    if (sharesTotal > abs) detail.push(`‧ 每人進位到整數，多收的零頭 ${formatMeso(sharesTotal - abs)} 歸墊付人`);
+    else if (sharesTotal < abs) detail.push(`‧ 每人捨去零頭，剩下的 ${formatMeso(abs - sharesTotal)} 留給墊付人`);
   }
 
   const payerId = rotPayerId(rot);
   const collectorId = rotCollectorId(rot);
-  // 墊付人已經先把錢付出去了，所以他自己那份不用再匯一次
+  // 墊付人已經先把錢付出去了，所以他自己那份不用再匯一次。
+  // 別人要匯的總和是「每個人的數字加起來」，取整之後不一定等於買圖價，所以不能再用 abs 去減。
   const ownerRow = rowsWithAmt.find(r => r.userId === payerId);
-  const collect = abs - (ownerRow ? Math.abs(ownerRow.amount) : 0);
+  const collect = sharesTotal - (ownerRow ? Math.abs(ownerRow.amount) : 0);
   const table = '```ansi\n' + body + '```';
   // 錢一律直接匯給墊付人（他出的錢他收回），收款人只負責催收、對帳
   const action = noSplit

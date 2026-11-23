@@ -7091,7 +7091,10 @@ function bcDetailPayload(key, notice) {
   const embed = new EmbedBuilder()
     .setColor(e.enabled ? 0x57F287 : 0x95A5A6)
     .setTitle(`📢 ${e.name}${e.custom ? '（自訂）' : '（內建）'}`)
-    .setDescription((notice ? `${notice}\n${PANEL_DIV}\n` : '') + (e.custom ? '' : e.desc))
+    // 描述一定要有字：Embed 的 description 不能是空字串，空的會直接丟 ValidationError。
+    // 以前自訂廣播沒有 notice 時剛好是空字串 —— 從清單點進去、或在刪除確認按「取消」都會炸，
+    // 結果自訂廣播永遠點不進詳細頁，也就刪不掉。
+    .setDescription((notice ? `${notice}\n${PANEL_DIV}\n` : '') + (e.custom ? '✍️ 自訂廣播，內容與排程都可以修改。' : e.desc))
     .addFields(
       { name: '狀態', value: e.enabled ? '🟢 開啟中' : '⚫ 已關閉（不會發送）', inline: true },
       { name: '排程', value: bcSchedLabel(e), inline: true },
